@@ -40,21 +40,46 @@ const NO_CONNECTION_CODES = new Set([
   "ERR_TLS_CERT_ALTNAME_INVALID",
 ]);
 
-/** True when every error code found on `error` and its causes says the connection never opened. */
-export function neverConnected(error: unknown): boolean {
+// Deno's fetch gives no code: its message names the phase that failed, and "client error (Connect)"
+// is the connection phase (TCP, DNS, TLS), before anything was written.
+const NO_CONNECTION_MESSAGE = /client error \(Connect\)/;
+
+const markedNotSent = new WeakSet<object>();
+
+/**
+ * For a custom `fetch`: marks an error it throws as "the connection never opened, so nothing was
+ * written". Without the mark, every failure of a custom fetch counts as possibly sent, because the
+ * SDK can't tell what happened inside it (a retry of its own, a redirect). A custom fetch must make
+ * exactly one attempt per call, and must not follow redirects.
+ */
+export function markNotSent<T extends object>(error: T): T {
+  markedNotSent.add(error);
+  return error;
+}
+
+/**
+ * True when `error` and its causes show the connection never opened: every error code found is one
+ * of those above, or, with no code at all, a message names the connection phase. These are the
+ * runtime's own fetch errors; a custom fetch says so with markNotSent.
+ */
+function neverConnected(error: unknown): boolean {
   const codes: string[] = [];
+  let connectMessage = false;
   const seen = new Set<unknown>();
   const visit = (value: unknown) => {
     if (typeof value !== "object" || value === null || seen.has(value)) return;
     seen.add(value);
     const code = (value as { code?: unknown }).code;
     if (typeof code === "string") codes.push(code);
+    const message = (value as { message?: unknown }).message;
+    if (typeof message === "string" && NO_CONNECTION_MESSAGE.test(message)) connectMessage = true;
     const nested = (value as { errors?: unknown }).errors;
     if (Array.isArray(nested)) nested.forEach(visit);
     visit((value as { cause?: unknown }).cause);
   };
   visit(error);
-  return codes.length > 0 && codes.every((code) => NO_CONNECTION_CODES.has(code));
+  if (codes.length > 0) return codes.every((code) => NO_CONNECTION_CODES.has(code));
+  return connectMessage;
 }
 
 /**
@@ -62,7 +87,7 @@ export function neverConnected(error: unknown): boolean {
  * unchanged, when `signal` aborts.
  */
 export async function attempt(
-  fetchImpl: FetchLike,
+  transport: { fetch: FetchLike; runtimeFetch: boolean },
   request: HttpRequest,
   timeoutMs: number,
   signal: AbortSignal | undefined,
@@ -85,17 +110,22 @@ export async function attempt(
   try {
     let response: Response;
     try {
-      response = await fetchImpl(request.url, init);
+      response = await transport.fetch(request.url, init);
     } catch (error) {
       if (signal?.aborted) throw signal.reason;
       if (timedOut) return { kind: "lost", error: timeoutError(timeoutMs) };
       const wrapped = new APIConnectionError(`The connection failed: ${describe(error)}`, { cause: error });
-      return neverConnected(error) ? { kind: "no_connection", error: wrapped } : { kind: "lost", error: wrapped };
+      const notSent =
+        (typeof error === "object" && error !== null && markedNotSent.has(error)) ||
+        (transport.runtimeFetch && neverConnected(error));
+      return notSent ? { kind: "no_connection", error: wrapped } : { kind: "lost", error: wrapped };
     }
+    const status = response.status;
+    const headers = response.headers instanceof Headers ? response.headers : new Headers();
     const body = await readBody(response);
-    if (body.complete) return { kind: "answer", status: response.status, headers: response.headers, text: body.text };
     if (signal?.aborted) throw signal.reason;
-    return { kind: "unreadable", status: response.status, headers: response.headers, partial: body.text };
+    if (body.complete) return { kind: "answer", status, headers, text: body.text };
+    return { kind: "unreadable", status, headers, partial: body.text };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
@@ -104,11 +134,11 @@ export async function attempt(
 
 /** The body as text, or as much of it as arrived before reading failed. */
 async function readBody(response: Response): Promise<{ complete: boolean; text: string }> {
-  if (!response.body) return { complete: true, text: "" };
-  const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let text = "";
   try {
+    if (!response.body) return { complete: true, text: "" };
+    const reader = response.body.getReader();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) return { complete: true, text: text + decoder.decode() };

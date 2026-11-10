@@ -50,20 +50,33 @@ function load(path: string): CaseFile | undefined {
 }
 
 const shared = load("../conformance/call-cases.json");
-const extra = load("../conformance/extra-cases.json");
+const extraFile = load("../conformance/extra-cases.json");
+// The extra cases use the shared file's defaults, calls and bodies, adding their own if they have any.
+const extra: CaseFile | undefined =
+  extraFile && shared
+    ? {
+        ...extraFile,
+        defaults: extraFile.defaults ?? shared.defaults,
+        calls: { ...shared.calls, ...extraFile.calls },
+        bodies: { ...shared.bodies, ...extraFile.bodies },
+      }
+    : extraFile;
 
 /** How each named call is made through the client. */
+const ORDER = { symbol: "EURUSD", type: "buy", volume: 0.1, type_filling: "ioc", sl: 1.079 } as const;
+const keyed = (key: string | undefined) => (key === undefined ? {} : { idempotencyKey: key });
+
 const CALLS: Record<string, (acct: Account, key: string | undefined) => Promise<unknown>> = {
+  place_order: (acct, key) => acct.orders.place(ORDER, keyed(key)),
+  cancel_order: (acct, key) => acct.orders.cancel(881402377, keyed(key)),
+  check_order: (acct) => acct.orders.check(ORDER),
+  engage_kill_switch: (acct) => acct.killSwitch.engage(),
   get_request: (acct) => acct.requests.get("req_5f0c2a9e41d7b3a8c6e2f190"),
   list_positions: (acct) => acct.positions.list(),
   list_symbols: (acct) => acct.symbols.list(),
   get_tick: (acct) => acct.symbols.tick("EURUSD"),
   history_deals: (acct) => acct.history.deals({ from: 1794009600, to: 1794095999 }),
 };
-
-// Trade calls, check and the kill switch's engage arrive in the next milestone. Until then their
-// cases are expected to fail; this list goes when they land.
-const NOT_YET = new Set(["place_order", "cancel_order", "check_order", "engage_kill_switch"]);
 
 /** Replaces `{"use": name}` with the named body. */
 function resolve(file: CaseFile, value: unknown): unknown {
@@ -210,7 +223,8 @@ function checkRaised(error: unknown, fields: Record<string, unknown> & { error: 
         throw new Error(`The runner doesn't know the field raise.${name}`);
     }
   }
-  if (fields.error === "OutcomeUnknown") expect(e.idempotencyKey).toBe(key);
+  // Every error the SDK raises from a keyed call carries the key it sent.
+  if (key !== undefined && fields.error !== "ArgumentError") expect(e.idempotencyKey).toBe(key);
 }
 
 for (const [label, file] of [
@@ -221,12 +235,12 @@ for (const [label, file] of [
   describe(label, () => {
     for (const c of file.cases) {
       const name = `${c.id}: ${c.title}`;
-      if (NOT_YET.has(c.call)) test.fails(name, () => run(file, c));
-      else test(name, () => run(file, c));
+      test(name, () => run(file, c));
     }
   });
 }
 
-test("the shared cases are present", () => {
+test("the shared and extra cases are present", () => {
   expect(shared?.cases.length).toBeGreaterThan(0);
+  expect(extra?.cases.length).toBeGreaterThan(0);
 });

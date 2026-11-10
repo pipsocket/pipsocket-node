@@ -19,7 +19,19 @@ const REQUEST = {
 };
 
 /** Each operation's SDK method, called with arguments that fill the document's path. */
-const METHODS: Record<string, { call: (acct: Account) => Promise<unknown>; path: string; answer?: unknown }> = {
+const ORDER = { symbol: "EURUSD", type: "buy", volume: 0.01, type_filling: "ioc" } as const;
+const MODIFY = { price: 1.05, sl: 1.04, tp: 1.07, type_time: "gtc" } as const;
+
+interface Method {
+  call: (acct: Account) => Promise<unknown>;
+  path: string;
+  answer?: unknown;
+  body?: unknown;
+  /** Takes an Idempotency-Key. */
+  keyed?: boolean;
+}
+
+const METHODS: Record<string, Method> = {
   account: { call: (a) => a.get(), path: "" },
   positions: { call: (a) => a.positions.list(), path: "/positions" },
   pending_orders: { call: (a) => a.orders.list(), path: "/orders" },
@@ -30,24 +42,48 @@ const METHODS: Record<string, { call: (acct: Account) => Promise<unknown>; path:
   symbol: { call: (a) => a.symbols.get("EURUSD"), path: "/symbols/EURUSD" },
   tick: { call: (a) => a.symbols.tick("EURUSD"), path: "/symbols/EURUSD/tick" },
   kill_switch: { call: (a) => a.killSwitch.get(), path: "/kill-switch" },
+  place_order: { call: (a) => a.orders.place(ORDER), path: "/orders", answer: REQUEST, body: ORDER, keyed: true },
+  check_order: { call: (a) => a.orders.check(ORDER), path: "/orders/check", body: ORDER },
+  modify_order: {
+    call: (a) => a.orders.modify(7, MODIFY),
+    path: "/orders/7",
+    answer: REQUEST,
+    body: MODIFY,
+    keyed: true,
+  },
+  cancel_order: { call: (a) => a.orders.cancel(7), path: "/orders/7", answer: REQUEST, keyed: true },
+  set_position_levels: {
+    call: (a) => a.positions.setLevels(9, { sl: 1.07, tp: 1.1 }),
+    path: "/positions/9",
+    answer: REQUEST,
+    body: { sl: 1.07, tp: 1.1 },
+    keyed: true,
+  },
+  close_position: {
+    call: (a) => a.positions.close(9, { volume: 0.01, type_filling: "ioc" }),
+    path: "/positions/9/close",
+    answer: REQUEST,
+    body: { volume: 0.01, type_filling: "ioc" },
+    keyed: true,
+  },
+  close_by: {
+    call: (a) => a.positions.closeBy(9, { position_by: 10 }),
+    path: "/positions/9/close-by",
+    answer: REQUEST,
+    body: { position_by: 10 },
+    keyed: true,
+  },
+  engage_kill_switch: {
+    call: (a) => a.killSwitch.engage({ deviation: 20 }),
+    path: "/kill-switch",
+    body: { deviation: 20 },
+  },
+  lift_kill_switch: { call: (a) => a.killSwitch.lift(), path: "/kill-switch" },
 };
-
-// Trade calls, check and the kill switch's engage and lift arrive in the next milestone.
-const NOT_YET = new Set([
-  "place_order",
-  "check_order",
-  "cancel_order",
-  "modify_order",
-  "set_position_levels",
-  "close_position",
-  "close_by",
-  "engage_kill_switch",
-  "lift_kill_switch",
-]);
 
 describe("every operation in the document has an SDK method", () => {
   test("no operation is missing from the method table", () => {
-    const missing = OPERATIONS.map((op) => op.operationId).filter((id) => !(id in METHODS) && !NOT_YET.has(id));
+    const missing = OPERATIONS.map((op) => op.operationId).filter((id) => !(id in METHODS));
     expect(missing).toEqual([]);
   });
 
@@ -61,6 +97,10 @@ describe("every operation in the document has an SDK method", () => {
       await method.call(acct);
       const sent = fake.sent[0];
       expect(sent?.method).toBe(op.method);
+      expect(sent?.body === undefined ? undefined : JSON.parse(sent.body)).toEqual(method.body);
+      // The calls the document gives an Idempotency-Key header are the ones that send one.
+      expect(method.keyed ?? false).toBe(op.keyed);
+      expect(sent?.headers["idempotency-key"] !== undefined).toBe(op.keyed);
       expect(sent?.url).toBe(`https://api.pipsocket.com/v1/accounts/${ACCOUNT_ID}${method.path}`);
       // The path the method sends fits the document's template for this operation.
       const template = new RegExp(`^${op.path.replace(/\{[a-z]+\}/g, "[^/?]+")}(\\?.*)?$`);

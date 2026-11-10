@@ -216,6 +216,21 @@ function countOpen(node) {
   return own + Object.values(node).reduce((sum, value) => sum + countOpen(value), 0);
 }
 
+/** The error codes the document lists for an operation's refusals: in their examples or descriptions. */
+function documentedCodes(operation, known) {
+  const codes = new Set();
+  for (const [status, response] of Object.entries(operation.responses)) {
+    if (status.startsWith("2")) continue;
+    for (const media of Object.values(response.content ?? {})) {
+      for (const name of Object.keys(media.examples ?? {})) if (known.includes(name)) codes.add(name);
+    }
+    for (const match of (response.description ?? "").matchAll(/`([a-z_]+)`:/g)) {
+      if (known.includes(match[1])) codes.add(match[1]);
+    }
+  }
+  return [...codes].sort();
+}
+
 function renderTables(doc) {
   const extension = doc["x-pipsocket"];
   const errors = Object.fromEntries(extension.errors.map((e) => [e.code, e.status]));
@@ -225,6 +240,7 @@ function renderTables(doc) {
     method: method.toUpperCase(),
     path,
     keyed: (operation.parameters ?? []).some((p) => p.in === "header" && p.name === "Idempotency-Key"),
+    codes: documentedCodes(operation, Object.keys(errors)),
   }));
   const states = doc.components.schemas.RequestState.enum;
   const json = (value) => JSON.stringify(value, null, 2);
@@ -238,7 +254,7 @@ function renderTables(doc) {
     "/** MT5's trade server return codes, by number, with the names the API sends in `retcode_name`. */",
     `export const RETCODE_NAMES: Readonly<Record<number, string>> = ${json(retcodes)};`,
     "",
-    "/** Every operation in the document. */",
+    "/** Every operation in the document, with the error codes it documents for its refusals. */",
     `export const OPERATIONS = ${json(ops)} as const;`,
     "",
     'export type OperationId = (typeof OPERATIONS)[number]["operationId"];',

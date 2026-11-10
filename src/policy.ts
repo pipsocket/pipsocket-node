@@ -44,6 +44,8 @@ export interface CodePolicy {
   safe: Step;
 }
 
+// On a trade call, a code the call's operation doesn't document is read as an unknown code, keeping
+// its error class: nothing in the document says that answer recorded nothing (see core.ts).
 export const CODE_POLICIES: Record<ErrorCode, CodePolicy> = {
   missing_api_key: { error: AuthenticationError, trade: "stop", safe: "stop" },
   invalid_api_key: { error: AuthenticationError, trade: "stop", safe: "stop" },
@@ -64,9 +66,9 @@ export const CODE_POLICIES: Record<ErrorCode, CodePolicy> = {
   account_not_connected: { error: AccountUnavailable, trade: "stop", safe: "stop" },
   bridge_outdated: { error: AccountUnavailable, trade: "stop", safe: "stop" },
   account_restarting: { error: AccountUnavailable, trade: "stop", safe: "stop" },
-  // The terminal's refusals. A trade call doesn't get these as refusals (a trade the terminal refuses
-  // comes back as a not_sent request), and the engine answers them before recording anything, so a
-  // trade call treats them as a read does.
+  // The terminal's refusals, which the document lists only for reads (a trade the terminal refuses
+  // comes back as a not_sent request). The trade column applies only to an operation that documents
+  // the code: on any other trade call, a code it doesn't document is read as an unknown one (core.ts).
   bad_command: { error: TerminalError, trade: "stop", safe: "stop" },
   terminal_error: { error: TerminalError, trade: "retry_once", safe: "retry_once" },
   symbol_too_large: { error: TerminalError, trade: "stop", safe: "stop" },
