@@ -79,121 +79,375 @@ export const RETCODE_NAMES: Readonly<Record<number, string>> = {
   "10046": "TRADE_RETCODE_HEDGE_PROHIBITED"
 };
 
-/** Every operation in the document. */
+/** Every operation in the document, with the error codes it documents for its refusals. */
 export const OPERATIONS = [
   {
     "operationId": "account",
     "method": "GET",
     "path": "/v1/accounts/{account}",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account"
+    ]
   },
   {
     "operationId": "pending_orders",
     "method": "GET",
     "path": "/v1/accounts/{account}/orders",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "place_order",
     "method": "POST",
     "path": "/v1/accounts/{account}/orders",
-    "keyed": true
+    "keyed": true,
+    "codes": [
+      "account_not_connected",
+      "account_restarting",
+      "billing_hold",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "kill_switch_engaged",
+      "magic_reserved",
+      "missing_api_key",
+      "no_such_account",
+      "not_executed",
+      "not_sent",
+      "symbol_busy",
+      "trade_rejected"
+    ]
   },
   {
     "operationId": "check_order",
     "method": "POST",
     "path": "/v1/accounts/{account}/orders/check",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "bad_command",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "cancel_order",
     "method": "DELETE",
     "path": "/v1/accounts/{account}/orders/{order}",
-    "keyed": true
+    "keyed": true,
+    "codes": [
+      "account_not_connected",
+      "account_restarting",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_order",
+      "not_executed",
+      "not_sent",
+      "symbol_busy",
+      "terminal_timeout",
+      "trade_rejected"
+    ]
   },
   {
     "operationId": "modify_order",
     "method": "PATCH",
     "path": "/v1/accounts/{account}/orders/{order}",
-    "keyed": true
+    "keyed": true,
+    "codes": [
+      "account_not_connected",
+      "account_restarting",
+      "billing_hold",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "kill_switch_engaged",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_order",
+      "not_executed",
+      "not_sent",
+      "symbol_busy",
+      "terminal_timeout",
+      "trade_rejected"
+    ]
   },
   {
     "operationId": "positions",
     "method": "GET",
     "path": "/v1/accounts/{account}/positions",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "set_position_levels",
     "method": "PATCH",
     "path": "/v1/accounts/{account}/positions/{position}",
-    "keyed": true
+    "keyed": true,
+    "codes": [
+      "account_not_connected",
+      "account_restarting",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_position",
+      "not_executed",
+      "not_sent",
+      "symbol_busy",
+      "terminal_timeout",
+      "trade_rejected"
+    ]
   },
   {
     "operationId": "close_position",
     "method": "POST",
     "path": "/v1/accounts/{account}/positions/{position}/close",
-    "keyed": true
+    "keyed": true,
+    "codes": [
+      "account_not_connected",
+      "account_restarting",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "magic_reserved",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_position",
+      "not_executed",
+      "not_sent",
+      "symbol_busy",
+      "terminal_timeout",
+      "trade_rejected"
+    ]
   },
   {
     "operationId": "close_by",
     "method": "POST",
     "path": "/v1/accounts/{account}/positions/{position}/close-by",
-    "keyed": true
+    "keyed": true,
+    "codes": [
+      "account_not_connected",
+      "account_restarting",
+      "bridge_outdated",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_position",
+      "not_executed",
+      "not_sent",
+      "symbol_busy",
+      "terminal_timeout",
+      "trade_rejected"
+    ]
   },
   {
     "operationId": "request",
     "method": "GET",
     "path": "/v1/accounts/{account}/requests/{request}",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_request"
+    ]
   },
   {
     "operationId": "symbols",
     "method": "GET",
     "path": "/v1/accounts/{account}/symbols",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account",
+      "symbol_too_large",
+      "terminal_error",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "symbol",
     "method": "GET",
     "path": "/v1/accounts/{account}/symbols/{symbol}",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account",
+      "no_such_symbol",
+      "terminal_error",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "tick",
     "method": "GET",
     "path": "/v1/accounts/{account}/symbols/{symbol}/tick",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_price",
+      "no_such_account",
+      "no_such_symbol",
+      "terminal_error",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "history_deals",
     "method": "GET",
     "path": "/v1/accounts/{account}/history/deals",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "bad_command",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account",
+      "range_too_large",
+      "terminal_error",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "history_orders",
     "method": "GET",
     "path": "/v1/accounts/{account}/history/orders",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "bad_command",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account",
+      "range_too_large",
+      "terminal_error",
+      "terminal_timeout"
+    ]
   },
   {
     "operationId": "kill_switch",
     "method": "GET",
     "path": "/v1/accounts/{account}/kill-switch",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "missing_api_key",
+      "no_such_account"
+    ]
   },
   {
     "operationId": "engage_kill_switch",
     "method": "POST",
     "path": "/v1/accounts/{account}/kill-switch",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "account_not_connected",
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account"
+    ]
   },
   {
     "operationId": "lift_kill_switch",
     "method": "DELETE",
     "path": "/v1/accounts/{account}/kill-switch",
-    "keyed": false
+    "keyed": false,
+    "codes": [
+      "engine_busy",
+      "engine_timeout",
+      "engine_unavailable",
+      "invalid_api_key",
+      "invalid_request",
+      "missing_api_key",
+      "no_such_account"
+    ]
   }
 ] as const;
 

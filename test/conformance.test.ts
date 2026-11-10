@@ -50,7 +50,17 @@ function load(path: string): CaseFile | undefined {
 }
 
 const shared = load("../conformance/call-cases.json");
-const extra = load("../conformance/extra-cases.json");
+const extraFile = load("../conformance/extra-cases.json");
+// The extra cases use the shared file's defaults, calls and bodies, adding their own if they have any.
+const extra: CaseFile | undefined =
+  extraFile && shared
+    ? {
+        ...extraFile,
+        defaults: extraFile.defaults ?? shared.defaults,
+        calls: { ...shared.calls, ...extraFile.calls },
+        bodies: { ...shared.bodies, ...extraFile.bodies },
+      }
+    : extraFile;
 
 /** How each named call is made through the client. */
 const ORDER = { symbol: "EURUSD", type: "buy", volume: 0.1, type_filling: "ioc", sl: 1.079 } as const;
@@ -230,6 +240,7 @@ for (const [label, file] of [
   });
 }
 
-test("the shared cases are present", () => {
+test("the shared and extra cases are present", () => {
   expect(shared?.cases.length).toBeGreaterThan(0);
+  expect(extra?.cases.length).toBeGreaterThan(0);
 });

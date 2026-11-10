@@ -1,6 +1,7 @@
 import { type AttemptResult, attempt, type FetchLike, type HttpRequest } from "./attempt.js";
 import { backoffMs, type CallKind, interpret } from "./core.js";
 import { APITimeoutError, AuthenticationError, NotFound, OutcomeUnknown, PipsocketError } from "./errors.js";
+import { OPERATIONS, type OperationId } from "./generated/tables.js";
 import { isFinal, type TradeRequest } from "./trade-request.js";
 import type {
   AccountView,
@@ -146,6 +147,8 @@ export interface CallSpec {
   method: "GET" | "POST" | "PATCH" | "DELETE";
   path: string;
   body?: unknown;
+  /** For a trade call: the operation, whose documented error codes decide how a refusal is read. */
+  operation?: OperationId;
 }
 
 /**
@@ -261,7 +264,7 @@ export class Pipsocket {
       }
       // A call cancelled while its attempt ran ends with the caller's reason, whatever came back.
       if (signal?.aborted) throw cancelled(signal.reason);
-      const verdict = interpret(result, spec.call, key);
+      const verdict = interpret(result, spec.call, key, spec.operation && DOCUMENTED_CODES.get(spec.operation));
       if (verdict.kind === "request") return verdict.request;
       if (verdict.kind === "json") return verdict.value;
       if (verdict.maybeSent) maybeSent = true;
@@ -284,6 +287,11 @@ export class Pipsocket {
     }
   }
 }
+
+/** Each operation's documented error codes, from the API document. */
+const DOCUMENTED_CODES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
+  OPERATIONS.map((op) => [op.operationId, new Set<string>(op.codes)]),
+);
 
 /** A new idempotency key (a UUID). Make one, save it, then pass it as `idempotencyKey`. */
 export function newKey(): string {
@@ -347,8 +355,14 @@ export class Account {
     this.#send = context.send;
   }
 
-  #trade(method: CallSpec["method"], path: string, body: unknown, options?: TradeCallOptions): Promise<TradeRequest> {
-    const spec: CallSpec = { call: "trade", method, path };
+  #trade(
+    operation: OperationId,
+    method: CallSpec["method"],
+    path: string,
+    body: unknown,
+    options?: TradeCallOptions,
+  ): Promise<TradeRequest> {
+    const spec: CallSpec = { call: "trade", method, path, operation };
     if (body !== undefined) spec.body = body;
     return this.#send(spec, options) as Promise<TradeRequest>;
   }
@@ -364,13 +378,13 @@ export class Account {
       this.#send({ call: "read", method: "GET", path: "/positions" }, options) as Promise<PositionView[]>,
     /** Sets a position's stop loss and take profit (0 removes one). */
     setLevels: async (ticket: number, levels: PositionLevelsBody, options?: TradeCallOptions): Promise<TradeRequest> =>
-      this.#trade("PATCH", ticketPath("/positions", ticket), levels, options),
+      this.#trade("set_position_levels", "PATCH", ticketPath("/positions", ticket), levels, options),
     /** Closes all or part of a position. */
     close: async (ticket: number, body: ClosePositionBody, options?: TradeCallOptions): Promise<TradeRequest> =>
-      this.#trade("POST", `${ticketPath("/positions", ticket)}/close`, body, options),
+      this.#trade("close_position", "POST", `${ticketPath("/positions", ticket)}/close`, body, options),
     /** Closes a position by an opposite one (`position_by`). */
     closeBy: async (ticket: number, body: CloseByBody, options?: TradeCallOptions): Promise<TradeRequest> =>
-      this.#trade("POST", `${ticketPath("/positions", ticket)}/close-by`, body, options),
+      this.#trade("close_by", "POST", `${ticketPath("/positions", ticket)}/close-by`, body, options),
   };
 
   readonly orders = {
@@ -379,16 +393,16 @@ export class Account {
       this.#send({ call: "read", method: "GET", path: "/orders" }, options) as Promise<PendingOrderView[]>,
     /** Sends a trade request: a market order, or a pending order. */
     place: async (order: PlaceOrderBody, options?: TradeCallOptions): Promise<TradeRequest> =>
-      this.#trade("POST", "/orders", order, options),
+      this.#trade("place_order", "POST", "/orders", order, options),
     /** Checks an order without sending it: margin, and whether MT5 would accept it. */
     check: async (order: PlaceOrderBody, options?: CallOptions): Promise<CheckView> =>
       this.#send({ call: "read", method: "POST", path: "/orders/check", body: order }, options) as Promise<CheckView>,
     /** Changes a pending order's price, stops and expiry. */
     modify: async (ticket: number, body: ModifyOrderBody, options?: TradeCallOptions): Promise<TradeRequest> =>
-      this.#trade("PATCH", ticketPath("/orders", ticket), body, options),
+      this.#trade("modify_order", "PATCH", ticketPath("/orders", ticket), body, options),
     /** Deletes a pending order. */
     cancel: async (ticket: number, options?: TradeCallOptions): Promise<TradeRequest> =>
-      this.#trade("DELETE", ticketPath("/orders", ticket), undefined, options),
+      this.#trade("cancel_order", "DELETE", ticketPath("/orders", ticket), undefined, options),
   };
 
   readonly requests = {

@@ -1,8 +1,8 @@
 // What a call does with one attempt's result, and whether it may try again. No I/O here.
 
 import type { AttemptResult } from "./attempt.js";
-import { APIError, InvalidRequest, isRecord, type PipsocketError } from "./errors.js";
-import { type ErrorClass, policyFor, type Step } from "./policy.js";
+import { APIConnectionError, APIError, InvalidRequest, isRecord, type PipsocketError } from "./errors.js";
+import { type ErrorClass, policyFor, type Step, unknownCodePolicy } from "./policy.js";
 import { isRecordedRequest, type TradeRequest, tradeRequestFrom } from "./trade-request.js";
 
 /**
@@ -47,7 +47,17 @@ function parseJson(text: string): { ok: true; value: unknown } | { ok: false } {
   }
 }
 
-export function interpret(result: AttemptResult, call: CallKind, idempotencyKey?: string): Verdict {
+/**
+ * `documented`: for a trade call, the error codes its operation documents. A known code a trade call
+ * doesn't document is read as an unknown one (a 5xx may have reached the host), keeping its error
+ * class: nothing in the document says that answer recorded nothing.
+ */
+export function interpret(
+  result: AttemptResult,
+  call: CallKind,
+  idempotencyKey?: string,
+  documented?: ReadonlySet<string>,
+): Verdict {
   const trade = call === "trade";
   if (result.kind === "no_connection") {
     return { kind: "retry", error: result.error, maybeSent: false, retryAfterMs: null, reason: "network" };
@@ -67,7 +77,12 @@ export function interpret(result: AttemptResult, call: CallKind, idempotencyKey?
   });
 
   if (result.kind === "unreadable") {
-    return malformed(result.partial, undefined, "the answer's body could not be read to the end");
+    // The connection failed part way through the answer: what arrived is kept, with the status.
+    const error = new APIConnectionError(`${status}: the answer's body could not be read to the end`, {
+      status,
+      raw: result.partial,
+    });
+    return { kind: "retry", error, maybeSent: trade, retryAfterMs: wait, reason: "malformed" };
   }
 
   const { text } = result;
@@ -109,7 +124,8 @@ export function interpret(result: AttemptResult, call: CallKind, idempotencyKey?
 
   const code = body.error;
   const policy = policyFor(code, status);
-  const step: Step = trade ? policy.trade : policy.safe;
+  const undocumented = trade && documented !== undefined && !documented.has(code);
+  const step: Step = undocumented ? unknownCodePolicy(status).trade : trade ? policy.trade : policy.safe;
   const errorClass: ErrorClass = (trade && policy.tradeError) || policy.error;
   const error = new errorClass({ status, code, body, raw: text, retryAfter: wait === null ? null : wait / 1000 });
   switch (step) {

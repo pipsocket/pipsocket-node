@@ -1,6 +1,7 @@
 import { inspect } from "node:util";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
+  APIConnectionError,
   APIError,
   APITimeoutError,
   type Clock,
@@ -203,8 +204,9 @@ test("a body that breaks off keeps what did arrive on the error", async () => {
     .account(ACCOUNT_ID)
     .positions.list()
     .catch((e) => e);
-  expect(error).toBeInstanceOf(APIError);
-  expect(error).toMatchObject({ status: 200, code: null, raw: '{"request":"req_' });
+  // A connection that failed part way through the answer: the status and what arrived are kept.
+  expect(error).toBeInstanceOf(APIConnectionError);
+  expect(error).toMatchObject({ status: 200, raw: '{"request":"req_' });
 });
 
 test("an answer that isn't JSON is retried, then raised with its status and text", async () => {
