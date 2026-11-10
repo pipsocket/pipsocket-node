@@ -85,15 +85,17 @@ Every call is for one account, so the client gives you a handle per account. Fie
 
 ## Every call
 
-| Call                                                                  | Method                                                                     |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| [The account](https://docs.pipsocket.com/api/account)                 | `acct.get()`                                                               |
-| [Positions](https://docs.pipsocket.com/api/positions)                 | `acct.positions.list()`                                                    |
-| [Pending orders](https://docs.pipsocket.com/api/pending-orders)       | `acct.orders.list()`                                                       |
-| [Look up a request](https://docs.pipsocket.com/api/look-up-a-request) | `acct.requests.get(id)`                                                    |
-| [Deal and order history](https://docs.pipsocket.com/api/history)      | `acct.history.deals({ from, to })`, `acct.history.orders({ from, to })`    |
-| [Symbols and prices](https://docs.pipsocket.com/api/symbols)          | `acct.symbols.list()`, `acct.symbols.get(name)`, `acct.symbols.tick(name)` |
-| [Kill switch](https://docs.pipsocket.com/api/kill-switch)             | `acct.killSwitch.get()`                                                    |
+| Call                                                                                                                                                                                                                                          | Method                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [The account](https://docs.pipsocket.com/api/account)                                                                                                                                                                                         | `acct.get()`                                                                                                                                                |
+| [Positions](https://docs.pipsocket.com/api/positions)                                                                                                                                                                                         | `acct.positions.list()`                                                                                                                                     |
+| [Close a position](https://docs.pipsocket.com/api/close-a-position), [close by](https://docs.pipsocket.com/api/close-by), [set stops](https://docs.pipsocket.com/api/set-stops)                                                               | `acct.positions.close(ticket, { volume, type_filling })`, `acct.positions.closeBy(ticket, { position_by })`, `acct.positions.setLevels(ticket, { sl, tp })` |
+| [Pending orders](https://docs.pipsocket.com/api/pending-orders)                                                                                                                                                                               | `acct.orders.list()`                                                                                                                                        |
+| [Place](https://docs.pipsocket.com/api/place-an-order), [check](https://docs.pipsocket.com/api/check-an-order), [modify](https://docs.pipsocket.com/api/modify-an-order) or [cancel](https://docs.pipsocket.com/api/cancel-an-order) an order | `acct.orders.place(order)`, `acct.orders.check(order)`, `acct.orders.modify(ticket, changes)`, `acct.orders.cancel(ticket)`                                 |
+| [Look up a request](https://docs.pipsocket.com/api/look-up-a-request)                                                                                                                                                                         | `acct.requests.get(id)`, and `acct.requests.wait(id)` until it is final                                                                                     |
+| [Deal and order history](https://docs.pipsocket.com/api/history)                                                                                                                                                                              | `acct.history.deals({ from, to })`, `acct.history.orders({ from, to })`                                                                                     |
+| [Symbols and prices](https://docs.pipsocket.com/api/symbols)                                                                                                                                                                                  | `acct.symbols.list()`, `acct.symbols.get(name)`, `acct.symbols.tick(name)`                                                                                  |
+| [Kill switch](https://docs.pipsocket.com/api/kill-switch)                                                                                                                                                                                     | `acct.killSwitch.get()`, `acct.killSwitch.engage({ deviation })`, `acct.killSwitch.lift()`                                                                  |
 
 History ranges are the broker's server time in whole seconds, not UTC, both ends included:
 
@@ -165,18 +167,22 @@ A key matches the first request made with it, whatever the body: never build key
 
 ## Errors and retries
 
-When a call can't give you its answer, it throws. Every error is a `PipsocketError`:
+When a call can't give you its answer, it throws. Every error is a `PipsocketError`, and every error a trade call throws carries the `idempotencyKey` it sent:
 
-| Error                                                       | When                                                                           |
-| ----------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `APIConnectionError`, `APITimeoutError`                     | The network failed, or an attempt took longer than `timeoutMs`                 |
-| `AuthenticationError`                                       | 401: the key is missing, wrong, or was rolled                                  |
-| `NotFound`                                                  | 404: no such account, request or symbol                                        |
-| `InvalidRequest`, `RangeTooLarge`                           | 400 or 422: fix the call                                                       |
-| `AccountUnavailable`                                        | 503: the account's terminal isn't connected, is restarting, or needs a restart |
-| `Unavailable`                                               | 503 `engine_unavailable` or 504 `engine_timeout`, after the retries            |
-| `EngineBusy`, `TerminalTimeout`, `TerminalError`, `NoPrice` | The host or the terminal couldn't answer                                       |
-| `APIError`                                                  | Any other refusal: `status`, `code`, `body` and `raw` say what came back       |
+| Error                                                       | When                                                                                                                                                    |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `OutcomeUnknown`                                            | A trade may have been sent and no recorded request came back: see [retries and idempotency keys](#retries-and-idempotency-keys)                         |
+| `APIConnectionError`, `APITimeoutError`                     | The network failed, or an attempt took longer than `timeoutMs`                                                                                          |
+| `AuthenticationError`                                       | 401: the key is missing, wrong, or was rolled                                                                                                           |
+| `NotFound`                                                  | 404: no such account, order, position, request or symbol                                                                                                |
+| `InvalidRequest`, `RangeTooLarge`                           | 400 or 422: fix the call. Nothing was sent                                                                                                              |
+| `SymbolBusy`                                                | 409: an earlier request on the symbol has no outcome yet. `blocking` lists them; `retryAfter` is null when one is `unknown`. Nothing was sent           |
+| `KillSwitchEngaged`, `BillingHold`                          | 423: new exposure is refused. Nothing was sent                                                                                                          |
+| `AccountUnavailable`                                        | 503: the account's terminal isn't connected, is restarting, or needs a restart. On engaging the kill switch, `killSwitch` shows it engaged all the same |
+| `Unavailable`                                               | 503 `engine_unavailable` or 504 `engine_timeout` on a call that is safe to repeat, after the retries                                                    |
+| `EngineBusy`, `TerminalTimeout`, `TerminalError`, `NoPrice` | The host or the terminal couldn't answer                                                                                                                |
+| `APIError`                                                  | Any other refusal: `status`, `code`, `body` and `raw` say what came back                                                                                |
+| `TradeNotAccepted`                                          | Only from `throwForState(request)`, for a request that was rejected, not sent or not executed                                                           |
 
 ```ts
 import { AccountUnavailable, Pipsocket } from "pipsocket";
@@ -193,14 +199,14 @@ try {
 
 The client retries what is worth retrying, twice by default, and starts no new attempt 60 seconds after the first: a lost connection, `503 engine_unavailable`, `504 engine_timeout`, `503 engine_busy`, `504 terminal_timeout`, and `409 symbol_busy` with a `Retry-After`, waiting 0.5 s and then 1 s (with jitter) between attempts, or what `Retry-After` says. It never retries a refusal that won't change, such as a 401 or a 404, and never retries a recorded request: a `rejected` or `not_sent` one is returned. See [Errors and retcodes](https://docs.pipsocket.com/errors) for every code.
 
-| Option            | Default                     |                                                                     |
-| ----------------- | --------------------------- | ------------------------------------------------------------------- |
-| `apiKey`          | `PIPSOCKET_KEY`             | Never logged and never in an error message                          |
-| `timeoutMs`       | `40000`                     | Per attempt. The API itself waits up to 30 s for the account's host |
-| `maxRetries`      | `2`                         | `0` turns retries off                                               |
-| `retryDeadlineMs` | `60000`                     | No new attempt starts this long after the first                     |
-| `baseUrl`         | `https://api.pipsocket.com` | For a mock server in your own tests                                 |
-| `fetch`           | the runtime's `fetch`       |                                                                     |
+| Option            | Default                     |                                                                                                                                                         |
+| ----------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiKey`          | `PIPSOCKET_KEY`             | Never logged and never in an error message                                                                                                              |
+| `timeoutMs`       | `40000`                     | Per attempt. The API itself waits up to 30 s for the account's host                                                                                     |
+| `maxRetries`      | `2`                         | `0` turns retries off                                                                                                                                   |
+| `retryDeadlineMs` | `60000`                     | No new attempt starts this long after the first                                                                                                         |
+| `baseUrl`         | `https://api.pipsocket.com` | For a mock server in your own tests                                                                                                                     |
+| `fetch`           | the runtime's `fetch`       | A custom one must make one attempt per call and follow no redirects. Its failures count as possibly sent unless it marks them with `markNotSent(error)` |
 
 Cancel a call with an `AbortSignal`: the call throws the signal's reason as it is, and sends nothing more. A trade that was already written may still execute, so for a call you may cancel, make and save the key first, as above.
 

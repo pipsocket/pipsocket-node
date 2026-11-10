@@ -266,12 +266,24 @@ describe("requests.wait", () => {
   });
 
   test("stops at its timeout: a lookup is bounded by the time left, and none starts after it", async () => {
-    const fake = new ScriptedFetch([{ answer: answer(200, recorded("pending")).answer }, { answer: hangUntilAborted }]);
+    const startedAt: number[] = [];
+    const hang = (request: Parameters<typeof hangUntilAborted>[0], signal: AbortSignal | undefined) => {
+      startedAt.push(performance.now());
+      return hangUntilAborted(request, signal);
+    };
+    const fake = new ScriptedFetch([
+      { answer: answer(200, recorded("pending")).answer },
+      { answer: hang },
+      { answer: hang },
+      { answer: hang },
+    ]);
     const acct = new Pipsocket({ apiKey: API_KEY, fetch: fake.fetch }).account(ACCOUNT_ID);
     const started = performance.now();
     const request = await acct.requests.wait("req_1", { timeoutMs: 300 });
     expect(request.kind).toBe("pending");
     expect(performance.now() - started).toBeLessThan(600);
+    // Lookups can start up to the deadline, never after it (a few ms of timer slack allowed).
+    for (const at of startedAt) expect(at - started).toBeLessThan(310);
     expect(fake.overrun).toBe(false);
   });
 
