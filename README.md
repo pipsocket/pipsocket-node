@@ -44,10 +44,11 @@ const acct = ps.account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
 const account = await acct.get();
 console.log(account.status, account.balance, account.currency);
 
-// A filling mode and a volume this symbol allows.
+// A filling mode and a volume this symbol allows. A market order can use fok or ioc (boc is for
+// limit orders only).
 const eurusd = await acct.symbols.get("EURUSD");
-const filling = (["fok", "ioc", "boc"] as const).find((mode) => eurusd.filling_modes.includes(mode));
-if (!filling) throw new Error("EURUSD allows none of the filling modes fok, ioc or boc");
+const filling = (["fok", "ioc"] as const).find((mode) => eurusd.filling_modes.includes(mode));
+if (!filling) throw new Error("EURUSD allows neither fok nor ioc, the filling modes a market order can use");
 
 const MAGIC = 4021; // this script's own number, kept by MT5 on its orders, deals and positions
 
@@ -128,7 +129,7 @@ What a `resync` gives, and what it doesn't:
 - **Not one moment in time.** The reads happen one after another, so a position can change between them.
 - **Not an order between events and the snapshot.** An event delivered after a resync can describe something older than the snapshot. Events are notices, not deltas: never add them to or subtract them from the snapshot. Deduplicate deals and orders by ticket and requests by id, and read again when exact state matters.
 - **Not a replay of the gap.** Events from a gap are not sent again, `request` events included. What happened in it comes from the resync: `history` holds the deals and past orders read back from history since the last checkpoint, best effort, and `requests.wait(id)` tells you how a request you sent settled. Ticks and transaction events from a gap are gone. When there is no `history`, `history_reason` says why (`no_checkpoint`, `account_changed`, `range_too_large` or `unavailable`).
-- **History from a little before the gap.** A resync's `history` starts 5 minutes before its checkpoint, so it can include deals from before you opened the stream. Deals and orders already delivered to you, as events or in an earlier resync, are left out.
+- **History from a little before the gap.** A resync's `history` starts 5 minutes before its checkpoint, so it can include deals from before you opened the stream. The helper leaves out deals it has already delivered to you as `deal` events or in an earlier resync, and orders from an earlier resync's history, as far as it remembers them (the last 10,000 of each). That is best effort: an order you saw only in a `transaction` event, or an old ticket, can come again, so deduplicate deals and orders by ticket yourself.
 
 `reason` is `connected`, `reconnected`, `lagged` (the server dropped events), `host_back` (the account's host or terminal came back) or `overflow` (your loop fell behind and the helper's own queue filled). Pass `snapshot: false` to get the `resync` event without the reads. `queueSize` (1000 by default) is how many events the helper holds for you before it treats a backlog as a gap.
 
@@ -199,10 +200,10 @@ import { newKey, OutcomeUnknown, Pipsocket } from "pipsocket";
 
 const acct = new Pipsocket().account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
 
-// A filling mode and a volume the symbol allows (MT5 rejects any other).
+// A filling mode and a volume the symbol allows (MT5 rejects any other): fok or ioc for a market order.
 const eurusd = await acct.symbols.get("EURUSD");
-const filling = (["fok", "ioc", "boc"] as const).find((mode) => eurusd.filling_modes.includes(mode));
-if (!filling) throw new Error("EURUSD allows none of the filling modes fok, ioc or boc");
+const filling = (["fok", "ioc"] as const).find((mode) => eurusd.filling_modes.includes(mode));
+if (!filling) throw new Error("EURUSD allows neither fok nor ioc, the filling modes a market order can use");
 const buy = { symbol: "EURUSD", type: "buy", volume: eurusd.volume_min, type_filling: filling } as const;
 
 const key = newKey();

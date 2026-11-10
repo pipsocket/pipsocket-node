@@ -129,6 +129,23 @@ describe("the quickstart reports each outcome for what it is", () => {
   });
 });
 
+test("the quickstart refuses a symbol that allows neither fok nor ioc, and sends nothing", async () => {
+  const quickstart = examples.find((code) => code.includes("orders.place(") && code.includes("switch (order.kind)"));
+  if (!quickstart) throw new Error("The README has no quickstart with a switch on kind");
+  const api = mockApi((method, path) =>
+    method === "GET" && path.endsWith("/symbols/EURUSD")
+      ? { status: 200, body: { name: "EURUSD", filling_modes: ["boc"], volume_min: 0.01, volume_step: 0.01 } }
+      : undefined,
+  );
+  vi.stubEnv("PIPSOCKET_KEY", "psk_example");
+  vi.stubGlobal("fetch", api.fetch);
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  const file = new URL("quickstart-boc-only.ts", folder);
+  writeFileSync(file, quickstart.replaceAll('from "pipsocket"', `from ${JSON.stringify(entry)}`));
+  await expect(import(file.pathname)).rejects.toThrow(/neither fok nor ioc/);
+  expect(api.calls.some((call) => call.method === "POST")).toBe(false);
+});
+
 test("the README examples type-check against the package's types", () => {
   const files = examples.map((code, index) => {
     const file = new URL(`check-${index + 1}.ts`, folder).pathname;
