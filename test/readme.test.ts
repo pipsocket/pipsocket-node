@@ -64,9 +64,17 @@ describe("the quickstart reports each outcome for what it is", () => {
   test.each(cases)("%s", async (state, status, extra, line) => {
     if (!quickstart) throw new Error("The README has no quickstart with a switch on kind");
     const body = { request: "req_1", state, sent, message: "...", ...extra };
-    const api = mockApi((method, path) =>
-      method === "POST" && path.endsWith("/orders") ? { status, body } : undefined,
-    );
+    // Three positions: only the EURUSD one with the quickstart's magic number is the order's.
+    const positions = [
+      { ticket: 1, identifier: 1, symbol: "GBPUSD", type: "buy", volume: 0.05, magic: 0 },
+      { ticket: 2, identifier: 2, symbol: "EURUSD", type: "buy", volume: 0.02, magic: 0 },
+      { ticket: 3, identifier: 3, symbol: "EURUSD", type: "buy", volume: 0.01, magic: 4021 },
+    ];
+    const api = mockApi((method, path) => {
+      if (method === "POST" && path.endsWith("/orders")) return { status, body };
+      if (method === "GET" && path.endsWith("/positions")) return { status: 200, body: positions };
+      return undefined;
+    });
     vi.stubEnv("PIPSOCKET_KEY", "psk_example");
     vi.stubGlobal("fetch", api.fetch);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
@@ -74,6 +82,10 @@ describe("the quickstart reports each outcome for what it is", () => {
     writeFileSync(file, quickstart.replaceAll('from "pipsocket"', `from ${JSON.stringify(entry)}`));
     await import(file.pathname);
     expect(log.mock.calls.map((call) => call[0])).toContain(line);
+    const closed = api.calls.filter((call) => call.method === "POST" && call.path.endsWith("/close"));
+    // Only a filled order's own position is closed; nothing else, whatever the outcome.
+    const filled = state === "completed" || state === "partial";
+    expect(closed.map((call) => call.path.split("/").at(-2))).toEqual(filled ? ["3"] : []);
   });
 });
 

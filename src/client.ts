@@ -1,6 +1,6 @@
 import { type AttemptResult, attempt, type FetchLike, type HttpRequest } from "./attempt.js";
 import { backoffMs, type CallKind, interpret } from "./core.js";
-import { AuthenticationError, NotFound, OutcomeUnknown, PipsocketError } from "./errors.js";
+import { APITimeoutError, AuthenticationError, NotFound, OutcomeUnknown, PipsocketError } from "./errors.js";
 import { isFinal, type TradeRequest } from "./trade-request.js";
 import type {
   AccountView,
@@ -408,6 +408,10 @@ export class Account {
 
   async #wait(id: string, { timeoutMs = 30_000, signal }: WaitOptions): Promise<TradeRequest> {
     nonEmpty("The request id", id);
+    if (typeof timeoutMs !== "number" || !(timeoutMs > 0) || !Number.isFinite(timeoutMs)) {
+      throw new TypeError("timeoutMs must be a number of milliseconds above 0");
+    }
+    if (signal?.aborted) throw signal.reason;
     const { clock } = this.#context;
     const deadline = clock.now() + timeoutMs;
     let interval = 250;
@@ -416,8 +420,9 @@ export class Account {
     for (;;) {
       const remaining = deadline - clock.now();
       if (remaining <= 0) {
+        if (signal?.aborted) throw signal.reason;
         if (latest) return latest;
-        throw lastError;
+        throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
       }
       // Each lookup is one attempt, bounded by the time left.
       const lookupOptions: CallOptions = {
@@ -435,8 +440,9 @@ export class Account {
       }
       const left = deadline - clock.now();
       if (left <= 0) {
+        if (signal?.aborted) throw signal.reason;
         if (latest) return latest;
-        throw lastError;
+        throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
       }
       await clock.sleep(Math.min(interval, left), signal);
       interval = Math.min(interval * 1.5, 2000);

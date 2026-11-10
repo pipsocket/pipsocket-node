@@ -33,7 +33,7 @@ Make your workspace's key on the dashboard's **API key** page, and keep it on yo
 export PIPSOCKET_KEY=psk_...
 ```
 
-Then read the account, place an order on a demo account, handle its outcome, and close it:
+Then read the account, place an order on a demo account, handle its outcome, and close what it opened. The order carries a `magic` number of your own, so the script closes only its own positions:
 
 ```ts
 import { Pipsocket } from "pipsocket";
@@ -44,14 +44,23 @@ const acct = ps.account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
 const account = await acct.get();
 console.log(account.status, account.balance, account.currency);
 
-let order = await acct.orders.place({ symbol: "EURUSD", type: "buy", volume: 0.01, type_filling: "ioc" });
+const MAGIC = 4021; // this script's own number, kept by MT5 on its orders, deals and positions
+
+let order = await acct.orders.place({ symbol: "EURUSD", type: "buy", volume: 0.01, type_filling: "ioc", magic: MAGIC });
 if (order.kind === "pending" || order.kind === "unknown") order = await acct.requests.wait(order.id);
 
 switch (order.kind) {
   case "completed":
-  case "partial":
+  case "partial": {
     console.log("filled: deal", order.result.deal);
+    // Close the position this order opened: on this symbol, with this script's magic number.
+    for (const position of await acct.positions.list()) {
+      if (position.symbol !== "EURUSD" || position.magic !== MAGIC) continue;
+      const close = await acct.positions.close(position.ticket, { volume: position.volume, type_filling: "ioc" });
+      console.log("close", position.ticket, close.state);
+    }
     break;
+  }
   case "placed":
     console.log("placed, not filled yet: order", order.result.order);
     break;
@@ -69,11 +78,6 @@ switch (order.kind) {
     // Still pending or unknown after the wait, or a state this version doesn't know: it may have
     // executed, so read positions and history before trading again.
     console.log("outcome not known yet:", order.state);
-}
-
-for (const position of await acct.positions.list()) {
-  const close = await acct.positions.close(position.ticket, { volume: position.volume, type_filling: "ioc" });
-  console.log("close", position.ticket, close.state);
 }
 ```
 

@@ -275,6 +275,18 @@ describe("requests.wait", () => {
     expect(fake.overrun).toBe(false);
   });
 
+  test.each([0, -1, Number.NaN])("a timeoutMs of %s is refused before any lookup", async (timeoutMs) => {
+    const { fake, acct } = setUp([]);
+    await expect(acct.requests.wait("req_1", { timeoutMs })).rejects.toThrow(TypeError);
+    expect(fake.sent).toHaveLength(0);
+  });
+
+  test("an already aborted signal throws its reason before any lookup", async () => {
+    const { fake, acct } = setUp([]);
+    await expect(acct.requests.wait("req_1", { signal: AbortSignal.abort("stop") })).rejects.toBe("stop");
+    expect(fake.sent).toHaveLength(0);
+  });
+
   test("with no answer at all before the timeout, throws the last failure", async () => {
     const clock = new FakeClock();
     const { acct } = setUp(
