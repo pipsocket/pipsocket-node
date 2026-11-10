@@ -14,7 +14,7 @@ export interface StreamOptions {
    * With false, a resync event carries only its reason, and the rest is null.
    */
   snapshot?: boolean;
-  /** Events held for you before the helper treats the backlog as a gap. Defaults to 10000. */
+  /** Events held for you before the helper treats the backlog as a gap. Defaults to 1000. */
   queueSize?: number;
   /** A socket adapter for a runtime that needs its own. Defaults to ws on Node, the built-in on Bun and Deno. */
   socket?: SocketFactory;
@@ -58,7 +58,7 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
     this.#machine = new StreamMachine({
       ticks: options.ticks ?? [],
       snapshot: options.snapshot ?? true,
-      queueSize: options.queueSize ?? 10_000,
+      queueSize: options.queueSize ?? 1000,
       random: context.random,
     });
     this.#socketFactory = options.socket ? Promise.resolve(options.socket) : defaultSocket();

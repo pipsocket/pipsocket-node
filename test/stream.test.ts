@@ -141,6 +141,21 @@ describe("a refused key", () => {
   });
 });
 
+describe("the local queue", () => {
+  test("holds 1000 events by default: one more unread, and the helper resyncs with reason overflow", async () => {
+    const { server, acct } = await start();
+    const stream = acct.stream();
+    const events = stream[Symbol.asyncIterator]();
+    await nextEvent(events);
+    for (let i = 0; i <= 1000; i += 1) server.connections[0]?.send({ type: "tick", symbol: "EURUSD", time_msc: i });
+    // Not reading meanwhile: give the 1001 ticks time to arrive.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const first = await nextEvent(events);
+    expect(first).toMatchObject({ type: "resync", reason: "overflow" });
+    stream.close();
+  });
+});
+
 describe("the stream's REST reads", () => {
   test("are one attempt each: the probe while the host is away doesn't retry inside", async () => {
     let accountReads = 0;
