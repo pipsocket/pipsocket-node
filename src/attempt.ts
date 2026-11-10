@@ -17,8 +17,8 @@ export type AttemptResult =
   /** The request may have been written, then the connection failed or timed out. */
   | { kind: "lost"; error: APIConnectionError }
   | { kind: "answer"; status: number; headers: Headers; text: string }
-  /** The status and headers arrived, then reading the body failed. */
-  | { kind: "unreadable"; status: number; headers: Headers };
+  /** The status and headers arrived, then reading the body failed. `partial` is what did arrive. */
+  | { kind: "unreadable"; status: number; headers: Headers; partial: string };
 
 // Error codes that mean the connection never opened (DNS, refused, unreachable, TLS), so nothing
 // was written. Node and undici put them on the error's `cause`; Bun on the error itself. Anything not
@@ -92,16 +92,30 @@ export async function attempt(
       const wrapped = new APIConnectionError(`The connection failed: ${describe(error)}`, { cause: error });
       return neverConnected(error) ? { kind: "no_connection", error: wrapped } : { kind: "lost", error: wrapped };
     }
-    try {
-      const text = await response.text();
-      return { kind: "answer", status: response.status, headers: response.headers, text };
-    } catch {
-      if (signal?.aborted) throw signal.reason;
-      return { kind: "unreadable", status: response.status, headers: response.headers };
-    }
+    const body = await readBody(response);
+    if (body.complete) return { kind: "answer", status: response.status, headers: response.headers, text: body.text };
+    if (signal?.aborted) throw signal.reason;
+    return { kind: "unreadable", status: response.status, headers: response.headers, partial: body.text };
   } finally {
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/** The body as text, or as much of it as arrived before reading failed. */
+async function readBody(response: Response): Promise<{ complete: boolean; text: string }> {
+  if (!response.body) return { complete: true, text: "" };
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return { complete: true, text: text + decoder.decode() };
+      text += decoder.decode(value, { stream: true });
+    }
+  } catch {
+    return { complete: false, text: text + decoder.decode() };
   }
 }
 

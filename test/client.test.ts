@@ -39,6 +39,21 @@ describe("constructing the client", () => {
     expect(() => new Pipsocket({ apiKey: API_KEY })).toThrow(/browser.*cross-origin/);
   });
 
+  test.each([
+    ["a line break", `${API_KEY}\nX-Other: 1`],
+    ["a space", `${API_KEY} `],
+  ])("refuses a key with %s, without showing it", (_label, key) => {
+    const error = (() => {
+      try {
+        new Pipsocket({ apiKey: key });
+      } catch (e) {
+        return e as Error;
+      }
+    })();
+    expect(error).toBeInstanceOf(PipsocketError);
+    expect(inspect(error, { showHidden: true, depth: 5 })).not.toContain(API_KEY);
+  });
+
   test("never shows the key when the client is printed", () => {
     const client = new Pipsocket({ apiKey: API_KEY });
     expect(inspect(client, { showHidden: true, depth: 5 })).not.toContain(API_KEY);
@@ -178,6 +193,18 @@ describe("cancelling a call with an AbortSignal", () => {
     await expect(client.account(ACCOUNT_ID).get({ signal: AbortSignal.abort("early") })).rejects.toBe("early");
     expect(fake.sent).toHaveLength(0);
   });
+});
+
+test("a body that breaks off keeps what did arrive on the error", async () => {
+  const cut = { respond: { status: 200, body_error: true } } as const;
+  const fake = new ScriptedFetch([{ answer: cut }, { answer: cut }, { answer: cut }]);
+  const client = new Pipsocket({ apiKey: API_KEY, fetch: fake.fetch, clock: new FakeClock() });
+  const error = await client
+    .account(ACCOUNT_ID)
+    .positions.list()
+    .catch((e) => e);
+  expect(error).toBeInstanceOf(APIError);
+  expect(error).toMatchObject({ status: 200, code: null, raw: '{"request":"req_' });
 });
 
 test("an answer that isn't JSON is retried, then raised with its status and text", async () => {

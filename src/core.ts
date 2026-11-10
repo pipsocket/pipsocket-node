@@ -67,7 +67,7 @@ export function interpret(result: AttemptResult, call: CallKind, idempotencyKey?
   });
 
   if (result.kind === "unreadable") {
-    return malformed("", undefined, "the answer's body could not be read to the end");
+    return malformed(result.partial, undefined, "the answer's body could not be read to the end");
   }
 
   const { text } = result;

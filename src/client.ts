@@ -159,6 +159,12 @@ export class Pipsocket {
     if (!apiKey) {
       throw new PipsocketError("No API key: pass apiKey, or set the PIPSOCKET_KEY environment variable.");
     }
+    // Checked here so that a malformed key never reaches fetch, whose header errors quote the value.
+    if (typeof apiKey !== "string" || !/^[\x21-\x7e]+$/.test(apiKey)) {
+      throw new PipsocketError(
+        "The API key isn't valid: it has spaces, line breaks or other characters a key never has.",
+      );
+    }
     this.#apiKey = apiKey;
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, "");
     this.streamUrl = (options.streamUrl ?? DEFAULT_STREAM_URL).replace(/\/+$/, "");

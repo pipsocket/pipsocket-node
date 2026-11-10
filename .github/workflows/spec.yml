@@ -133,10 +133,12 @@ jobs:
             echo '```'
             echo "</details>"
           } > "$RUNNER_TEMP/body.md"
+          gh label create "spec: tests passed" --force --color 0e8a16
+          gh label create "spec: tests failed" --force --color d93f0b
           label="spec: tests $RESULT"
-          gh label create "$label" --force --color "$([ "$RESULT" = passed ] && echo 0e8a16 || echo d93f0b)"
+          if [ "$RESULT" = passed ]; then other="spec: tests failed"; else other="spec: tests passed"; fi
           if gh pr view "$BRANCH" --json state --jq .state 2>/dev/null | grep -q OPEN; then
-            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md" --remove-label "spec: tests passed,spec: tests failed" --add-label "$label"
+            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md" --remove-label "$other" --add-label "$label"
           else
             gh pr create --head "$BRANCH" --title "Update the API document snapshot" --body-file "$RUNNER_TEMP/body.md" --label "$label"
           fi

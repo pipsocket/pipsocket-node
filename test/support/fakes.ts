@@ -43,10 +43,16 @@ export function networkError(code: string): TypeError {
 }
 
 function bodyThatFails(): ReadableStream<Uint8Array> {
+  // The first read gets the start of a body; the next one fails, as when a connection drops mid-body.
+  let sent = false;
   return new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode('{"request":"req_'));
-      controller.error(networkError("ECONNRESET"));
+    pull(controller) {
+      if (sent) {
+        controller.error(networkError("ECONNRESET"));
+      } else {
+        sent = true;
+        controller.enqueue(new TextEncoder().encode('{"request":"req_'));
+      }
     },
   });
 }

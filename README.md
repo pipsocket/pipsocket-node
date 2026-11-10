@@ -138,7 +138,7 @@ The client refuses to start in a browser: the API doesn't answer browsers' cross
 
 - [Quickstart](https://docs.pipsocket.com/quickstart), [API reference](https://docs.pipsocket.com), [WebSocket stream](https://docs.pipsocket.com/websocket), [Errors and retcodes](https://docs.pipsocket.com/errors)
 - [Examples](https://github.com/pipsocket/examples)
-- [The MCP server](https://github.com/pipsocket/mcp), for AI apps
+- [The MCP server](https://github.com/pipsocket/mcp)
 
 ## Versioning
 
