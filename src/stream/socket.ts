@@ -138,16 +138,22 @@ export function webSocket(WebSocketClass: WebSocketWithHeaders): SocketFactory {
   };
 }
 
-/** The adapter for this runtime: Bun's and Deno's own WebSocket, or the ws package on Node. */
+/**
+ * The adapter for this runtime. Node and Deno use the ws package when it is installed: it reports a
+ * refused handshake's status, and its close() drops the connection at once. Bun, and Deno without
+ * ws, use the runtime's own WebSocket and the weaker contract above. (Deno's own WebSocket also
+ * waits for the server to answer its close, so with a peer that never answers, the process stays
+ * up until the connection times out: install ws on Deno.)
+ */
 export async function defaultSocket(): Promise<SocketFactory> {
   const scope = globalThis as { Bun?: unknown; Deno?: unknown; WebSocket?: unknown };
-  if ((scope.Bun || scope.Deno) && typeof scope.WebSocket === "function") {
-    return webSocket(scope.WebSocket as WebSocketWithHeaders);
-  }
+  const builtIn = typeof scope.WebSocket === "function" ? webSocket(scope.WebSocket as WebSocketWithHeaders) : null;
+  if (scope.Bun && builtIn) return builtIn;
   let module: { default?: unknown; WebSocket?: unknown };
   try {
     module = (await import("ws")) as { default?: unknown; WebSocket?: unknown };
   } catch (error) {
+    if (scope.Deno && builtIn) return builtIn;
     throw new StreamError(
       "The stream needs the ws package on Node (npm install ws): Node's own WebSocket can't send the key or report why a handshake failed.",
       { cause: error },

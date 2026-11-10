@@ -117,7 +117,7 @@ What a `resync` gives, and what it doesn't:
 
 `reason` is `connected`, `reconnected`, `lagged` (the server dropped events), `host_back` (the account's host or terminal came back) or `overflow` (your loop fell behind and the helper's own queue filled). Pass `snapshot: false` to get the `resync` event without the reads.
 
-A refused key or account (401, 404) ends the stream with that error, as does a key rolled while it was open, at the stream's next read (or a `requests.wait` lookup's). A network failure never ends it on Node: it keeps reconnecting, with backoff, until you close it. On Bun and Deno the WebSocket can't say why an upgrade failed, so the stream checks with a REST read: a 401 or 404 there ends it at once, and if the API answers but the upgrade keeps failing five times running, it ends with `StreamHandshakeError` (see Runtimes). An open stream also helps `requests.wait`: a request event ends the wait as soon as it arrives, and a trade call never reports a request as pending once the stream has shown it final.
+A refused key or account (401, 404) ends the stream with that error, as does a key rolled while it was open, at the stream's next read (or a `requests.wait` lookup's). A network failure never ends it on Node: it keeps reconnecting, with backoff, until you close it. On Bun, and on Deno without `ws`, the WebSocket can't say why an upgrade failed, so the stream checks with a REST read: a 401 or 404 there ends it at once, and if the API answers but the upgrade keeps failing five times running, it ends with `StreamHandshakeError` (see Runtimes). An open stream also helps `requests.wait`: a request event ends the wait as soon as it arrives, and a trade call never reports a request as pending once the stream has shown it final.
 
 ## Every call
 
@@ -248,12 +248,15 @@ Cancel a call with an `AbortSignal`: the call throws the signal's reason as it i
 
 ## Runtimes
 
-| Runtime            | REST          |
-| ------------------ | ------------- |
-| Node 22 and later  | yes           |
-| Bun, Deno          | yes           |
-| Cloudflare Workers | yes           |
-| Browsers           | no, by design |
+| Runtime            | REST          | Stream                                                         |
+| ------------------ | ------------- | -------------------------------------------------------------- |
+| Node 22 and later  | yes           | yes, with the `ws` package                                     |
+| Bun                | yes           | yes, with its own WebSocket                                    |
+| Deno 2.5 and later | yes           | yes, with the `ws` package (recommended), or its own WebSocket |
+| Cloudflare Workers | yes           | no                                                             |
+| Browsers           | no, by design | no                                                             |
+
+With `ws`, the stream sees why an upgrade was refused: a 401 or 404 ends it at once, and `close()` drops the connection at once. Bun's WebSocket, and Deno's own without `ws`, can't say why an upgrade was refused, so after a failed upgrade the stream makes one REST read with the same key: a 401 or 404 there ends the stream, and if the API answers and the upgrade still fails five times running, the stream ends with `StreamHandshakeError`. Deno's own WebSocket also waits for the server to answer its close, so a stream closed while the network is dead can keep the process up until the connection times out. A runtime that needs another WebSocket client can pass its own adapter as `socket`.
 
 The client refuses to start in a browser: the API doesn't answer browsers' cross-origin requests, and an API key in a web page would leak. Call the API from your server.
 

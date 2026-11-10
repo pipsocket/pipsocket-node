@@ -34,6 +34,8 @@ export interface FakeServerOptions {
   refuse?: () => { status: number; body: unknown; stall?: boolean } | undefined;
   /** Called for every accepted socket. */
   connected?: (connection: FakeConnection) => void;
+  /** Never answer the client's closing handshake, as a peer on a dead network wouldn't. */
+  ignoreClose?: boolean;
 }
 
 export interface FakeServer {
@@ -83,7 +85,7 @@ export async function fakeServer(options: FakeServerOptions): Promise<FakeServer
     socket.write(
       `HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: ${accept}\r\n\r\n`,
     );
-    const connection = accepted(socket, request.headers);
+    const connection = accepted(socket, request.headers, options.ignoreClose ?? false);
     connections.push(connection);
     options.connected?.(connection);
   });
@@ -124,7 +126,7 @@ function bigLength(length: number): Buffer {
   return out;
 }
 
-function accepted(socket: Duplex, headers: IncomingMessage["headers"]): FakeConnection {
+function accepted(socket: Duplex, headers: IncomingMessage["headers"], ignoreClose: boolean): FakeConnection {
   const received: string[] = [];
   /** Frames no next() has taken yet. */
   const unclaimed: string[] = [];
@@ -162,7 +164,7 @@ function accepted(socket: Duplex, headers: IncomingMessage["headers"]): FakeConn
         if (index >= 0) waiters.splice(index, 1)[0]?.resolve(text);
         else unclaimed.push(text);
       } else if (opcode === 8) {
-        socket.end(frame(8, Buffer.alloc(0)));
+        if (!ignoreClose) socket.end(frame(8, Buffer.alloc(0)));
       } else if (opcode === 9) {
         socket.write(frame(10, payload));
       }

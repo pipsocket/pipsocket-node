@@ -4,7 +4,7 @@
 
 import { afterEach, describe, expect, test } from "vitest";
 import { AuthenticationError, Pipsocket, type ResyncEvent, StreamError, type StreamEvent } from "../src/index.js";
-import { defaultSocket, type SocketFactory } from "../src/stream/socket.js";
+import { defaultSocket, type SocketFactory, webSocket } from "../src/stream/socket.js";
 import { type FakeConnection, type FakeServer, type FakeServerOptions, fakeServer } from "./support/fake-server.js";
 import { ACCOUNT_ID, API_KEY } from "./support/fakes.js";
 
@@ -93,6 +93,17 @@ describe("connecting", () => {
     await server.connections[0]?.closed;
   });
 
+  test("close() drops the connection at once, even when the server never answers the closing handshake", async () => {
+    const { server, acct } = await start({ ignoreClose: true });
+    const stream = acct.stream({ snapshot: false });
+    await nextEvent(stream[Symbol.asyncIterator]());
+    const closedAt = performance.now();
+    stream.close();
+    await server.connections[0]?.closed;
+    // Nothing is left for the peer to answer, so nothing keeps the process up.
+    expect(performance.now() - closedAt).toBeLessThan(1000);
+  });
+
   test("close() before the socket is made opens none, and leaves nothing open", async () => {
     const { acct } = await start();
     const opened: string[] = [];
@@ -174,6 +185,36 @@ describe("a refusal whose body stalls", () => {
     const started = Date.now();
     await expect(acct.stream()[Symbol.asyncIterator]().next()).rejects.toBeInstanceOf(AuthenticationError);
     expect(Date.now() - started).toBeLessThan(5000);
+  });
+});
+
+// Bun and Deno's own WebSocket can't see a refused upgrade's status: the stream asks over REST.
+// Bun uses it by default; Deno uses it when ws isn't installed, so these pass it explicitly.
+const builtIn = globalThis as { Bun?: unknown; Deno?: unknown; WebSocket?: unknown };
+describe.runIf(builtIn.Bun || builtIn.Deno)("the runtime's own WebSocket, which can't see the status", () => {
+  const ownSocket = () => webSocket(builtIn.WebSocket as Parameters<typeof webSocket>[0]);
+
+  test("a refused key is found by the REST read, and ends the stream", async () => {
+    const { acct } = await start({ refuse: () => ({ status: 401, body: UNAUTHORIZED[1] }), rest: () => UNAUTHORIZED });
+    const events = acct.stream({ socket: ownSocket() })[Symbol.asyncIterator]();
+    await expect(events.next()).rejects.toBeInstanceOf(AuthenticationError);
+  });
+
+  test("a dead network is retried with backoff, for as long as the stream is kept", async () => {
+    const { server, acct } = await start();
+    const port = server.port;
+    await server.close();
+    let attempts = 0;
+    const real = ownSocket();
+    const counting: SocketFactory = (url, headers, events) => {
+      attempts += 1;
+      return real(url.replace(/:\d+\//, `:${port}/`), headers, events);
+    };
+    const stream = acct.stream({ socket: counting });
+    const next = stream[Symbol.asyncIterator]().next();
+    await waitFor(() => attempts >= 3, 5000);
+    stream.close();
+    expect(await next).toEqual({ done: true, value: undefined });
   });
 });
 
