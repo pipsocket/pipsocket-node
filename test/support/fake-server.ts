@@ -87,6 +87,11 @@ export async function fakeServer(options: FakeServerOptions): Promise<FakeServer
     connections.push(connection);
     options.connected?.(connection);
   });
+  // Every connection, REST keep-alive ones included, so close() never waits on one.
+  server.on("connection", (socket: Duplex) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   return {
     port: (server.address() as AddressInfo).port,

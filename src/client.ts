@@ -488,8 +488,9 @@ export class Account {
         if (seenFinal) return seenFinal;
         const remaining = deadline - clock.now();
         if (remaining <= 0) {
+          if (signal?.aborted) throw signal.reason;
           if (latest) return latest;
-          throw lastError;
+          throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
         }
         // Each lookup is one attempt, bounded by the time left.
         const lookupOptions: CallOptions = {
@@ -514,8 +515,9 @@ export class Account {
         if (seenFinal) return seenFinal;
         const left = deadline - clock.now();
         if (left <= 0) {
+          if (signal?.aborted) throw signal.reason;
           if (latest) return latest;
-          throw lastError;
+          throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
         }
         try {
           await clock.sleep(Math.min(interval, left), sleepSignal);
