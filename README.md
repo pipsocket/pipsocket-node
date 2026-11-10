@@ -2,7 +2,7 @@
 
 TypeScript client for the Pipsocket API: REST and WebSocket access to MetaTrader 5 accounts hosted by Pipsocket.
 
-> This is an alpha. It has every REST call. The stream helper comes in the next release.
+> This is an alpha: the API it calls is stable, but this package may still change between minor versions.
 
 ## Why
 
@@ -82,6 +82,42 @@ switch (order.kind) {
 ```
 
 Every call is for one account, so the client gives you a handle per account. Field names are the API's own (`type_filling`, `price_open`), as in the [API reference](https://docs.pipsocket.com).
+
+## Streaming
+
+The stream pushes what happens on the account as it happens: fills, deals, prices, the account every second. On Node it needs the `ws` package:
+
+```bash
+npm install pipsocket ws
+```
+
+```ts
+import { isEvent, Pipsocket } from "pipsocket";
+
+const acct = new Pipsocket().account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
+const stream = acct.stream({ ticks: ["EURUSD"] });
+
+for await (const event of stream) {
+  if (isEvent(event, "resync")) console.log("baseline", event.reason, event.positions?.length, "positions");
+  else if (isEvent(event, "tick")) console.log(event.symbol, event.bid, event.ask);
+  else if (isEvent(event, "request")) console.log("request", event.request, event.state);
+  else console.log(event.type);
+}
+```
+
+The events are the API's messages as they are (see [the WebSocket stream](https://docs.pipsocket.com/websocket)), plus one the helper adds: `resync`. A message of a type added later is passed on too, so `isEvent(event, "tick")` is how to narrow one to its known shape. The helper reconnects by itself, with backoff, sends your tick set again, pings the socket every 20 seconds, and after every connect and every gap yields a `resync` event. `stream.setTicks(symbols)` changes the tick set; `stream.close()`, or leaving the loop, stops it.
+
+What a `resync` gives, and what it doesn't:
+
+- **A new baseline for state.** `account`, `positions` and `orders` as REST showed them after the subscription was live: replace your own state with them. `positions` and `orders` are `null` when the terminal isn't running, which is not the same as empty.
+- **Every deal, request, transaction and status event** the socket carried from the subscription on, delivered after the `resync` when it finishes without another gap. `account` and `tick` events are thinned during a resync: the next `account` event comes within a second, and only the newest tick per symbol is kept.
+- **Not one moment in time.** The reads happen one after another, so a position can change between them.
+- **Not an order between events and the snapshot.** An event delivered after a resync can describe something older than the snapshot. Events are notices, not deltas: never add them to or subtract them from the snapshot. Deduplicate deals and orders by ticket and requests by id, and read again when exact state matters.
+- **Not the past in full.** Ticks and transaction events from a gap are gone. Deals and past orders are read back from history since the last checkpoint, best effort, in `history`; when there is none, `history_reason` says why (`no_checkpoint`, `account_changed`, `range_too_large` or `unavailable`).
+
+`reason` is `connected`, `reconnected`, `lagged` (the server dropped events), `host_back` (the account's host or terminal came back) or `overflow` (your loop fell behind and the helper's own queue filled). Pass `snapshot: false` to get the `resync` event without the reads.
+
+A refused key or account (401, 404) ends the stream with that error, as does a key rolled while it was open, at its next read. Network failures never end it: it keeps reconnecting until you close it. An open stream also helps `requests.wait`: a request event ends the wait as soon as it arrives.
 
 ## Every call
 

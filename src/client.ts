@@ -2,7 +2,9 @@ import { type AttemptResult, attempt, type FetchLike, type HttpRequest } from ".
 import { backoffMs, type CallKind, interpret } from "./core.js";
 import { APITimeoutError, AuthenticationError, NotFound, OutcomeUnknown, PipsocketError } from "./errors.js";
 import { OPERATIONS, type OperationId } from "./generated/tables.js";
-import { isFinal, type TradeRequest } from "./trade-request.js";
+import { isFatal, type Read } from "./stream/machine.js";
+import { AccountStream, type StreamOptions } from "./stream/stream.js";
+import { isFinal, isRecordedRequest, type TradeRequest, tradeRequestFrom } from "./trade-request.js";
 import type {
   AccountView,
   CheckView,
@@ -211,6 +213,9 @@ export class Pipsocket {
       send: (spec, options) => this.#send(accountId, spec, options),
       clock: this.#clock,
       timeoutMs: this.timeoutMs,
+      random: this.#random,
+      streamUrl: `${this.streamUrl}/v1/accounts/${encodeURIComponent(accountId)}/stream`,
+      streamHeaders: () => ({ Authorization: `Bearer ${this.#apiKey}`, "User-Agent": this.#userAgent }),
     });
   }
 
@@ -340,6 +345,11 @@ interface AccountContext {
   send: Send;
   clock: Clock;
   timeoutMs: number;
+  random: () => number;
+  /** wss://.../v1/accounts/{account}/stream */
+  streamUrl: string;
+  /** The upgrade request's headers, the key included. */
+  streamHeaders: () => Record<string, string>;
 }
 
 /** The calls for one account. Get one with `Pipsocket.account(id)`. */
@@ -431,35 +441,130 @@ export class Account {
     let interval = 250;
     let latest: TradeRequest | undefined;
     let lastError: unknown;
-    for (;;) {
-      const remaining = deadline - clock.now();
-      if (remaining <= 0) {
-        if (signal?.aborted) throw signal.reason;
-        if (latest) return latest;
-        throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
+    // A final state seen on an open stream ends the wait early: whichever comes first wins.
+    let seenFinal: TradeRequest | undefined;
+    const woken = new AbortController();
+    const listener = (request: TradeRequest) => {
+      if (isFinal(request) && !seenFinal) {
+        seenFinal = request;
+        woken.abort();
       }
-      // Each lookup is one attempt, bounded by the time left.
-      const lookupOptions: CallOptions = {
-        maxRetries: 0,
-        timeoutMs: Math.min(this.#context.timeoutMs, remaining),
-      };
-      if (signal) lookupOptions.signal = signal;
-      try {
-        latest = await this.requests.get(id, lookupOptions);
-        if (isFinal(latest)) return latest;
-      } catch (error) {
-        if (signal?.aborted) throw signal.reason;
-        if (error instanceof AuthenticationError || error instanceof NotFound) throw error;
-        lastError = error;
+    };
+    this.#watch(id, listener);
+    const sleepSignal = signal ? AbortSignal.any([signal, woken.signal]) : woken.signal;
+    try {
+      for (;;) {
+        if (seenFinal) return seenFinal;
+        const remaining = deadline - clock.now();
+        if (remaining <= 0) {
+          if (latest) return latest;
+          throw lastError;
+        }
+        // Each lookup is one attempt, bounded by the time left.
+        const lookupOptions: CallOptions = {
+          maxRetries: 0,
+          timeoutMs: Math.min(this.#context.timeoutMs, remaining),
+        };
+        if (signal) lookupOptions.signal = signal;
+        try {
+          latest = await this.requests.get(id, lookupOptions);
+          if (isFinal(latest)) return latest;
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          if (error instanceof AuthenticationError || error instanceof NotFound) throw error;
+          lastError = error;
+        }
+        if (seenFinal) return seenFinal;
+        const left = deadline - clock.now();
+        if (left <= 0) {
+          if (latest) return latest;
+          throw lastError;
+        }
+        try {
+          await clock.sleep(Math.min(interval, left), sleepSignal);
+        } catch (reason) {
+          if (signal?.aborted) throw signal.reason;
+          if (!seenFinal) throw reason;
+        }
+        interval = Math.min(interval * 1.5, 2000);
       }
-      const left = deadline - clock.now();
-      if (left <= 0) {
-        if (signal?.aborted) throw signal.reason;
-        if (latest) return latest;
-        throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
+    } finally {
+      this.#unwatch(id, listener);
+    }
+  }
+
+  /** requests.wait calls in progress, by request id: an open stream tells them what it sees. */
+  readonly #watchers = new Map<string, Set<(request: TradeRequest) => void>>();
+
+  #watch(id: string, listener: (request: TradeRequest) => void): void {
+    const set = this.#watchers.get(id) ?? new Set();
+    set.add(listener);
+    this.#watchers.set(id, set);
+  }
+
+  #unwatch(id: string, listener: (request: TradeRequest) => void): void {
+    const set = this.#watchers.get(id);
+    set?.delete(listener);
+    if (set?.size === 0) this.#watchers.delete(id);
+  }
+
+  #requestSeen(request: TradeRequest): void {
+    for (const listener of this.#watchers.get(request.id) ?? []) listener(request);
+  }
+
+  /**
+   * The account's stream of events: the API's messages as they are, and a `resync` event after
+   * every connect and gap, with a fresh snapshot to replace your state with. On Node it needs the
+   * ws package (npm install ws).
+   *
+   * ```ts
+   * const stream = acct.stream({ ticks: ["EURUSD"] })
+   * for await (const event of stream) console.log(event.type)
+   * ```
+   */
+  stream(options: StreamOptions = {}): AccountStream {
+    const context = this.#context;
+    return new AccountStream(
+      {
+        url: context.streamUrl,
+        headers: context.streamHeaders,
+        random: context.random,
+        read: (read, signal) => this.#streamRead(read, signal),
+        requestSeen: (message) => {
+          if (isRecordedRequest(message)) this.#requestSeen(tradeRequestFrom(message));
+        },
+      },
+      options,
+    );
+  }
+
+  /** The REST reads the stream helper makes: each is one call, and the helper retries. */
+  async #streamRead(read: Read, signal: AbortSignal): Promise<unknown> {
+    const options: CallOptions = { signal };
+    switch (read.what) {
+      case "account":
+      case "probe":
+        return this.get(options);
+      case "positions":
+        return this.positions.list(options);
+      case "orders":
+        return this.orders.list(options);
+      case "deals":
+        return this.history.deals({ from: read.from, to: read.to }, options);
+      case "history_orders":
+        return this.history.orders({ from: read.from, to: read.to }, options);
+      case "watched": {
+        // Look up every request a wait() is waiting on. A 401 or a 404 for the account ends the
+        // stream; other failures are left to wait()'s own polling.
+        for (const id of [...this.#watchers.keys()]) {
+          try {
+            this.#requestSeen(await this.requests.get(id, options));
+          } catch (error) {
+            if (isFatal(error)) throw error;
+          }
+        }
+        return null;
       }
-      await clock.sleep(Math.min(interval, left), signal);
-      interval = Math.min(interval * 1.5, 2000);
     }
   }
 

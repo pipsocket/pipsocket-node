@@ -3,7 +3,18 @@
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import ts from "typescript";
 import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { NotFound } from "../src/index.js";
 import { mockApi } from "./support/mock-api.js";
+
+// Every WebSocket an example opens is the mock's: the ws package on Node, the global one on Bun and Deno.
+const sockets = vi.hoisted(() => ({ current: undefined as unknown }));
+vi.mock("ws", () => {
+  function WebSocket(url: string, options: unknown) {
+    const Mock = sockets.current as new (url: string, options: unknown) => unknown;
+    return new Mock(url, options);
+  }
+  return { default: WebSocket, WebSocket };
+});
 
 const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
 const examples = [...readme.matchAll(/```ts\n([\s\S]*?)```/g)].map((match) => match[1] ?? "");
@@ -27,10 +38,24 @@ examples.forEach((code, index) => {
     const api = mockApi();
     vi.stubEnv("PIPSOCKET_KEY", "psk_example");
     vi.stubGlobal("fetch", api.fetch);
+    vi.stubGlobal("WebSocket", api.WebSocket);
+    sockets.current = api.WebSocket;
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     const file = new URL(`example-${index + 1}.ts`, folder);
     writeFileSync(file, code.replaceAll('from "pipsocket"', `from ${JSON.stringify(entry)}`));
-    await import(file.pathname);
+    const streams = code.includes(".stream(");
+    const outcome = await import(file.pathname).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    if (streams) {
+      // The mock's stream drops once, then the account is gone: the loop ends with NotFound.
+      expect(outcome).toBeInstanceOf(NotFound);
+      expect(api.sockets).toBe(2);
+      expect(log.mock.calls.map((call) => call[0])).toEqual(expect.arrayContaining(["baseline", "EURUSD", "request"]));
+    } else {
+      expect(outcome).toBeUndefined();
+    }
     expect(api.calls.length).toBeGreaterThan(0);
     expect(log).toHaveBeenCalled();
   });

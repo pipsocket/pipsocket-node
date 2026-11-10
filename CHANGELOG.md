@@ -10,6 +10,7 @@ Every release names the snapshot of the API document it was built from: the date
 - `orders.check`, `killSwitch.engage` and `killSwitch.lift`.
 - `requests.wait(id, { timeoutMs })`: looks a request up until it is final or the timeout passes.
 - `newKey()`, and `idempotencyKey` on the trade calls, to save a key before sending.
+- `acct.stream({ ticks })`: the account's events as an async iterable, with `setTicks` and `close`. It reconnects with backoff, sets the ticks again, keeps the socket alive, and after every connect and gap yields a `resync` event with a fresh snapshot and the history read back since its checkpoint. On Node it uses the `ws` package, an optional peer dependency.
 - `OutcomeUnknown`: a trade call that may have reached the account's host, with no recorded request back, throws it with the key.
 
 ## 0.1.0-alpha.1

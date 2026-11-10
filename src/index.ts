@@ -33,6 +33,28 @@ export {
   Unavailable,
 } from "./errors.js";
 export { ERROR_STATUS, type ErrorCode, RETCODE_NAMES, type RequestState } from "./generated/tables.js";
+export type {
+  HandshakeFailure,
+  HistoryReason,
+  ResyncEvent,
+  ResyncReason,
+  StreamMessage,
+} from "./stream/machine.js";
+export {
+  type AccountMessage,
+  type DealMessage,
+  type EngineDisconnectedMessage,
+  isEvent,
+  type KnownEvent,
+  type LaggedMessage,
+  type RequestMessage,
+  type StatusMessage,
+  type StreamEvent,
+  type TickMessage,
+  type TransactionMessage,
+} from "./stream/messages.js";
+export type { SocketEvents, SocketFactory, StreamSocket } from "./stream/socket.js";
+export { AccountStream, type StreamOptions } from "./stream/stream.js";
 export {
   isAccepted,
   isFinal,
