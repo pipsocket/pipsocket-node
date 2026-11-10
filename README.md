@@ -2,7 +2,7 @@
 
 TypeScript client for the Pipsocket API: REST and WebSocket access to MetaTrader 5 accounts hosted by Pipsocket.
 
-> This is an alpha: the API it calls is stable, but this package may still change between minor versions.
+> Versions are 0.x for now: until 1.0, a minor release may change this package's API. [CHANGELOG.md](CHANGELOG.md) says what each one changes.
 
 ## Why
 
@@ -33,7 +33,7 @@ Make your workspace's key on the dashboard's **API key** page, and keep it on yo
 export PIPSOCKET_KEY=psk_...
 ```
 
-Then read the account, place an order on a demo account, handle its outcome, and close what it opened. The order carries a `magic` number of your own, so the script closes only its own positions:
+Then read the account, place an order on a demo account, handle its outcome, and close what it opened. A symbol allows only some filling modes and volumes, and MT5 rejects an order with any other (`10030`, `10014`), so the order takes them from the symbol. It also carries a `magic` number of your own, so the script closes only its own positions:
 
 ```ts
 import { Pipsocket } from "pipsocket";
@@ -44,25 +44,39 @@ const acct = ps.account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
 const account = await acct.get();
 console.log(account.status, account.balance, account.currency);
 
+// A filling mode and a volume this symbol allows.
+const eurusd = await acct.symbols.get("EURUSD");
+const filling = (["fok", "ioc", "boc"] as const).find((mode) => eurusd.filling_modes.includes(mode));
+if (!filling) throw new Error("EURUSD allows none of the filling modes fok, ioc or boc");
+
 const MAGIC = 4021; // this script's own number, kept by MT5 on its orders, deals and positions
 
-let order = await acct.orders.place({ symbol: "EURUSD", type: "buy", volume: 0.01, type_filling: "ioc", magic: MAGIC });
+let order = await acct.orders.place({
+  symbol: "EURUSD",
+  type: "buy",
+  volume: eurusd.volume_min,
+  type_filling: filling,
+  magic: MAGIC,
+});
 if (order.kind === "pending" || order.kind === "unknown") order = await acct.requests.wait(order.id);
 
 switch (order.kind) {
   case "completed":
-  case "partial": {
+  case "partial":
+  case "placed":
+    // MT5 took the request. That alone doesn't mean filled: a fill has a deal (result.deal isn't 0);
+    // a pending order placed has its order and deal 0, whether the state is placed or completed.
+    if (order.result.deal === 0) {
+      console.log("placed, not filled: order", order.result.order);
+      break;
+    }
     console.log("filled: deal", order.result.deal);
     // Close the position this order opened: on this symbol, with this script's magic number.
     for (const position of await acct.positions.list()) {
       if (position.symbol !== "EURUSD" || position.magic !== MAGIC) continue;
-      const close = await acct.positions.close(position.ticket, { volume: position.volume, type_filling: "ioc" });
+      const close = await acct.positions.close(position.ticket, { volume: position.volume, type_filling: filling });
       console.log("close", position.ticket, close.state);
     }
-    break;
-  }
-  case "placed":
-    console.log("placed, not filled yet: order", order.result.order);
     break;
   case "rejected":
     console.log("rejected:", order.result.retcode_name);
@@ -113,7 +127,8 @@ What a `resync` gives, and what it doesn't:
 - **Every deal, request, transaction and status event** the socket carried from the subscription on, delivered after the `resync` when it finishes without another gap. `account` and `tick` events are thinned during a resync: the next `account` event comes within a second, and only the newest tick per symbol is kept.
 - **Not one moment in time.** The reads happen one after another, so a position can change between them.
 - **Not an order between events and the snapshot.** An event delivered after a resync can describe something older than the snapshot. Events are notices, not deltas: never add them to or subtract them from the snapshot. Deduplicate deals and orders by ticket and requests by id, and read again when exact state matters.
-- **Not the past in full.** Ticks and transaction events from a gap are gone. Deals and past orders are read back from history since the last checkpoint, best effort, in `history`; when there is none, `history_reason` says why (`no_checkpoint`, `account_changed`, `range_too_large` or `unavailable`).
+- **Not a replay of the gap.** Events from a gap are not sent again, `request` events included. What happened in it comes from the resync: `history` holds the deals and past orders read back from history since the last checkpoint, best effort, and `requests.wait(id)` tells you how a request you sent settled. Ticks and transaction events from a gap are gone. When there is no `history`, `history_reason` says why (`no_checkpoint`, `account_changed`, `range_too_large` or `unavailable`).
+- **History from a little before the gap.** A resync's `history` starts 5 minutes before its checkpoint, so it can include deals from before you opened the stream. Deals and orders already delivered to you, as events or in an earlier resync, are left out.
 
 `reason` is `connected`, `reconnected`, `lagged` (the server dropped events), `host_back` (the account's host or terminal came back) or `overflow` (your loop fell behind and the helper's own queue filled). Pass `snapshot: false` to get the `resync` event without the reads. `queueSize` (1000 by default) is how many events the helper holds for you before it treats a backlog as a gap.
 
@@ -133,16 +148,16 @@ A refused key or account (401, 404) ends the stream with that error, as does a k
 | [Symbols and prices](https://docs.pipsocket.com/api/symbols)                                                                                                                                                                                  | `acct.symbols.list()`, `acct.symbols.get(name)`, `acct.symbols.tick(name)`                                                                                  |
 | [Kill switch](https://docs.pipsocket.com/api/kill-switch)                                                                                                                                                                                     | `acct.killSwitch.get()`, `acct.killSwitch.engage({ deviation })`, `acct.killSwitch.lift()`                                                                  |
 
-History ranges are the broker's server time in whole seconds, not UTC, both ends included:
+History ranges are the broker's server time in whole seconds, both ends included, not UTC: build them from the account's `server_time`, never from your own clock:
 
 ```ts
 import { Pipsocket } from "pipsocket";
 
 const acct = new Pipsocket().account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
 
-const { server_time } = await acct.get();
-const now = server_time ?? 0;
-const deals = await acct.history.deals({ from: now - 86_400, to: now });
+const { server_time } = await acct.get(); // the broker's server time, in seconds
+if (typeof server_time !== "number") throw new Error("The terminal hasn't reported its server time yet");
+const deals = await acct.history.deals({ from: server_time - 86_400, to: server_time });
 console.log(deals.length, "deals in the last day");
 ```
 
@@ -152,16 +167,20 @@ Every call takes an options object last: `{ signal, timeoutMs, maxRetries }`, an
 
 A trade call returns a `TradeRequest` for every answer that is a recorded request, whatever its state, rejections included. `kind` is the state, closed so that a `switch` on it narrows `result`; `state` is the API's own string. See [request ids](https://docs.pipsocket.com/accounts#request-ids) and [errors](https://docs.pipsocket.com/errors).
 
-| `kind`                           | Meaning                                                                           | `result`                                 |
-| -------------------------------- | --------------------------------------------------------------------------------- | ---------------------------------------- |
-| `completed`, `placed`, `partial` | MT5 took it. `partial` is final for that request                                  | MT5's answer: `retcode`, `deal`, `order` |
-| `rejected`                       | MT5 rejected it. Final: change it and send it again (a new call, a new key)       | MT5's answer: `retcode_name` says why    |
-| `pending`                        | No answer from the trade server within 5 s. Never sent again: `requests.wait(id)` | `null`                                   |
-| `unknown`                        | No answer within 130 s. It may have executed: check positions and history         | `null`                                   |
-| `not_sent`                       | The terminal didn't send it. Call again to send it                                | `{ error, message }`                     |
-| `not_executed`                   | Was unknown, settled as never executed (`settlement` says by whom)                | `{ error, message }`, or who settled it  |
-| `executed`                       | Was unknown, settled as executed by an owner or admin                             | Who settled it, and why                  |
-| `unrecognised`                   | A state this version doesn't know yet: read `state`                               | as sent                                  |
+| `kind`         | Meaning                                                                                        | `result`                                    |
+| -------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| `completed`    | MT5 completed the request: an order filled, a pending order placed, or a change or cancel made | MT5's answer: `retcode`, `order`, `deal`    |
+| `placed`       | MT5 placed it, such as a pending order. Not filled                                             | MT5's answer, with `order` set and `deal` 0 |
+| `partial`      | MT5 filled part of it. Final for that request                                                  | MT5's answer, with the `deal`               |
+| `rejected`     | MT5 rejected it. Final: change it and send it again (a new call, a new key)                    | MT5's answer: `retcode_name` says why       |
+| `pending`      | No answer from the trade server within 5 s. Never sent again: `requests.wait(id)`              | `null`                                      |
+| `unknown`      | No answer within 130 s. It may have executed: check positions and history                      | `null`                                      |
+| `not_sent`     | The terminal didn't send it. Call again to send it                                             | `{ error, message }`                        |
+| `not_executed` | Was unknown, settled as never executed (`settlement` says by whom)                             | `{ error, message }`, or who settled it     |
+| `executed`     | Was unknown, settled as executed by an owner or admin                                          | Who settled it, and why                     |
+| `unrecognised` | A state this version doesn't know yet: read `state`                                            | as sent                                     |
+
+`completed` doesn't mean filled. To tell a fill, read `result.deal`: it isn't 0 when an order filled (and its `sent.action` is `"deal"`). A pending order that MT5 accepted has `result.order` set and `deal` 0, whether it comes back `placed` or `completed`; so does a modify or a cancel.
 
 `isAccepted(request)`, `isFinal(request)` and `isOutstanding(request)` answer the common questions, and `throwForState(request)` throws `TradeNotAccepted` for `rejected`, `not_sent` and `not_executed`, if you would rather have exceptions.
 
@@ -180,21 +199,21 @@ import { newKey, OutcomeUnknown, Pipsocket } from "pipsocket";
 
 const acct = new Pipsocket().account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
 
+// A filling mode and a volume the symbol allows (MT5 rejects any other).
+const eurusd = await acct.symbols.get("EURUSD");
+const filling = (["fok", "ioc", "boc"] as const).find((mode) => eurusd.filling_modes.includes(mode));
+if (!filling) throw new Error("EURUSD allows none of the filling modes fok, ioc or boc");
+const buy = { symbol: "EURUSD", type: "buy", volume: eurusd.volume_min, type_filling: filling } as const;
+
 const key = newKey();
-// Save the key with what it is for (a database row, a file) before sending.
+// Save the key, with the order it is for, before sending (a database row, a file).
 try {
-  const order = await acct.orders.place(
-    { symbol: "EURUSD", type: "buy", volume: 0.01, type_filling: "ioc" },
-    { idempotencyKey: key },
-  );
+  const order = await acct.orders.place(buy, { idempotencyKey: key });
   console.log(order.state);
 } catch (error) {
   if (!(error instanceof OutcomeUnknown)) throw error;
   // Later, or after a restart: the same call with the same key returns the recorded request.
-  const order = await acct.orders.place(
-    { symbol: "EURUSD", type: "buy", volume: 0.01, type_filling: "ioc" },
-    { idempotencyKey: key },
-  );
+  const order = await acct.orders.place(buy, { idempotencyKey: key });
   console.log(order.state);
 }
 ```

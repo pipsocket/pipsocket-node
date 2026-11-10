@@ -104,6 +104,34 @@ describe("connecting", () => {
     expect(performance.now() - closedAt).toBeLessThan(1000);
   });
 
+  test("after close(), next() is done: events still queued are dropped", async () => {
+    const { server, acct } = await start();
+    const stream = acct.stream();
+    const events = stream[Symbol.asyncIterator]();
+    await nextEvent(events);
+    for (let ticket = 1; ticket <= 3; ticket += 1) server.connections[0]?.send({ type: "deal", deal: { ticket } });
+    await new Promise((resolve) => setTimeout(resolve, 200)); // the three deals are queued, not taken
+    stream.close();
+    expect(await events.next()).toEqual({ done: true, value: undefined });
+  });
+
+  test("a for await body that calls close() ends on its next turn", async () => {
+    const { server, acct } = await start();
+    const stream = acct.stream();
+    const seen: string[] = [];
+    let sent = false;
+    for await (const event of stream) {
+      seen.push(event.type);
+      if (!sent) {
+        sent = true;
+        for (let ticket = 1; ticket <= 3; ticket += 1) server.connections[0]?.send({ type: "deal", deal: { ticket } });
+        await new Promise((resolve) => setTimeout(resolve, 200)); // the deals are queued behind this event
+        stream.close();
+      }
+    }
+    expect(seen).toEqual(["resync"]);
+  });
+
   test("close() before the socket is made opens none, and leaves nothing open", async () => {
     const { acct } = await start();
     const opened: string[] = [];
