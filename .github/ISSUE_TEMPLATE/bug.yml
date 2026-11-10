@@ -1,0 +1,30 @@
+name: SDK bug
+description: Something in this package doesn't work as its README or the API docs say.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is for bugs in the SDK itself. For your account, billing or a trade, write to support@pipsocket.com.
+        Never paste an API key, an account id, a login or a broker server here: this repository is public.
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: input
+    id: runtime
+    attributes:
+      label: Runtime and version
+      placeholder: Node 22.12, Bun 1.4, Deno 2.5
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: The smallest code that shows it, and the error or result you got.
+    validations:
+      required: true
