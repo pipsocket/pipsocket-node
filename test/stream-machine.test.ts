@@ -882,3 +882,18 @@ describe("held events and fatal reads", () => {
     expect(d.state).toBe(state);
   });
 });
+
+test("account_changed is reported again if the resync that carried it overflowed before the caller took it", () => {
+  const d = connectedLive({ queueSize: 3 });
+  d.message({ type: "lagged", missed: 1 });
+  d.completeResync({ account: { ...ACCOUNT, login: 777 } }); // queued, not taken
+  for (let i = 0; i < 3; i += 1) d.message({ type: "tick", symbol: "EURUSD", time_msc: i }); // overflows
+  d.completeResync({ account: { ...ACCOUNT, login: 777 } });
+  expect(d.resyncs()[0]).toMatchObject({ reason: "overflow", history: null, history_reason: "account_changed" });
+  d.message({ type: "lagged", missed: 2 });
+  d.completeResync({ account: { ...ACCOUNT, login: 777 } });
+  // Taken now: the next resync reads the new login's history from its own checkpoint.
+  const next = d.resyncs()[0];
+  expect(next?.history_reason).toBeNull();
+  expect(next?.history).not.toBeNull();
+});

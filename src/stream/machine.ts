@@ -214,7 +214,7 @@ export class StreamMachine {
   /** Bumped when the account's login or server changes; each queued event keeps the one it came in. */
   #identity = 0;
   #identityOf = new WeakMap<object, number>();
-  /** A login or server change seen and not yet reported on a queued resync event. */
+  /** A login or server change seen and not yet taken by the caller on a resync event. */
   #identityChangePending = false;
   #deliveredDeals = new Set<number>();
   #deliveredOrders = new Set<number>();
@@ -250,6 +250,8 @@ export class StreamMachine {
     if (this.#identityOf.get(event) !== this.#identity) return;
     if (event.type === "deal") this.#rememberDeal(event as StreamMessage);
     if (event.type === "resync") {
+      // The caller has the account_changed now: later resyncs read history again.
+      if ((event as ResyncEvent).history_reason === "account_changed") this.#identityChangePending = false;
       const history = (event as ResyncEvent).history;
       for (const deal of history?.deals ?? []) this.#rememberTicket(this.#deliveredDeals, deal.ticket);
       for (const order of history?.orders ?? []) this.#rememberTicket(this.#deliveredOrders, order.ticket);
@@ -733,7 +735,6 @@ export class StreamMachine {
     }
     for (const queued of batch) if (!this.#identityOf.has(queued)) this.#identityOf.set(queued, this.#identity);
     this.#queue.push(...batch);
-    if (resync.identityChanged) this.#identityChangePending = false;
     actions.push({ type: "wake" });
     // The terminal came back while this resync found it away: read again now it is there.
     if (terminalBack) actions.push(...this.#startResync("host_back"));
