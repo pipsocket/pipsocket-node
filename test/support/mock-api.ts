@@ -37,7 +37,7 @@ function successExample(operation: Operation): { status: number; body: unknown }
 
 export interface MockApi {
   fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
-  calls: Array<{ method: string; path: string }>;
+  calls: Array<{ method: string; path: string; body?: unknown }>;
   /** A WebSocket class for the stream, in both the ws package's style and the web's. */
   WebSocket: new (
     url: string,
@@ -50,9 +50,9 @@ export interface MockApi {
 /**
  * A mock of the API. The stream says subscribed, answers the tick set, sends one tick and one
  * request event, then drops; from then on the account is gone (404), so a stream ends with
- * NotFound instead of running for ever.
+ * NotFound instead of running for ever. `answer` replaces the document's example for the calls it
+ * returns an answer for.
  */
-/** `answer` replaces the document's example for the calls it returns an answer for. */
 export function mockApi(
   answer?: (method: string, path: string) => { status: number; body: unknown } | undefined,
 ): MockApi {
@@ -64,7 +64,8 @@ export function mockApi(
     fetch: async (input, init) => {
       const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
       const method = init?.method ?? "GET";
-      calls.push({ method, path: url.pathname + url.search });
+      const sent = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+      calls.push({ method, path: url.pathname + url.search, ...(sent === undefined ? {} : { body: sent }) });
       const route = routes.find((r) => r.method === method && r.pattern.test(url.pathname));
       if (url.origin !== "https://api.pipsocket.com" || !route) {
         return Response.json({ error: "no_such_route", message: `${method} ${url.pathname}` }, { status: 404 });

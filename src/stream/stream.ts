@@ -51,6 +51,8 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
   #ended = false;
   #error: unknown = null;
   #errorThrown = false;
+  /** close() was called. A stream that failed instead still delivers what came before the failure. */
+  #closed = false;
   readonly #unwatchFatal: () => void;
 
   constructor(context: StreamContext, options: StreamOptions = {}) {
@@ -88,8 +90,12 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
     return settled;
   }
 
-  /** Stops the stream at once: the socket closes and nothing more is read. */
+  /**
+   * Stops the stream at once: the socket closes, nothing more is read, and events still queued are
+   * dropped, so the next `next()` is done. A `for await` loop that calls it ends on its next turn.
+   */
   close(): void {
+    this.#closed = true;
     this.#input({ type: "close" });
     this.#end(null);
   }
@@ -97,6 +103,8 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
   async *[Symbol.asyncIterator](): AsyncIterator<StreamEvent> {
     try {
       for (;;) {
+        // Closed by the caller: whatever is still queued isn't wanted any more.
+        if (this.#closed) return;
         const event = this.#machine.take();
         if (event) {
           yield event as StreamEvent;

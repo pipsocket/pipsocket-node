@@ -1,6 +1,6 @@
 {
   "name": "pipsocket",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0",
   "description": "TypeScript client for the Pipsocket API: REST and WebSocket access to MetaTrader 5 accounts hosted by Pipsocket.",
   "keywords": [
     "pipsocket",
