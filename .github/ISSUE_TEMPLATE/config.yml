@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: A question about your account, billing or a trade
+    url: mailto:support@pipsocket.com
+    about: Write to support@pipsocket.com. Please don't post account ids, keys or trades in a public issue.
+  - name: The API's documentation
+    url: https://docs.pipsocket.com
+    about: How each call, error and the stream work.

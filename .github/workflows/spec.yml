@@ -1,0 +1,166 @@
+name: API document
+
+# Daily, and on demand: fetch the published OpenAPI document, and when it differs from the snapshot,
+# regenerate, run the tests, and open (or update) a pull request with the result, pass or fail.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spec
+  cancel-in-progress: false
+
+env:
+  DOCUMENT_URL: https://docs.pipsocket.com/openapi.json
+  BRANCH: spec/update
+  OTHER_REPO: pipsocket/pipsocket-python
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+
+      - name: Fetch the published document
+        run: curl -fsSL -A "pipsocket-node-spec-check (+https://github.com/pipsocket/pipsocket-node)" -o "$RUNNER_TEMP/live.json" "$DOCUMENT_URL"
+
+      - name: Compare with the snapshot
+        id: compare
+        run: |
+          if node scripts/spec.mjs compare "$RUNNER_TEMP/live.json" > "$RUNNER_TEMP/extension.md"; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/extension.md"
+
+      - name: Diff with oasdiff
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          curl -fsSLo oasdiff.tar.gz https://github.com/oasdiff/oasdiff/releases/download/v1.37.0/oasdiff_1.37.0_linux_amd64.tar.gz
+          echo "eac87307d31d08c36800c58a409c247f1c5db37fbb72e2544402f22a87cbca3c  oasdiff.tar.gz" | sha256sum --check
+          tar -xzf oasdiff.tar.gz oasdiff
+          {
+            echo "### Breaking changes (oasdiff)"
+            echo '```'
+            ./oasdiff breaking --severity-levels .github/oasdiff-levels.txt openapi.json "$RUNNER_TEMP/live.json" || true
+            echo '```'
+            echo "### Changelog (oasdiff)"
+            echo '```'
+            ./oasdiff changelog openapi.json "$RUNNER_TEMP/live.json" || true
+            echo '```'
+          } > "$RUNNER_TEMP/oasdiff.md"
+          rm -f oasdiff oasdiff.tar.gz
+
+      - name: Regenerate
+        id: generate
+        if: steps.compare.outputs.changed == 'true'
+        run: |
+          node scripts/spec.mjs update "$RUNNER_TEMP/live.json"
+          if pnpm generate > "$RUNNER_TEMP/generate.log" 2>&1; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$RUNNER_TEMP/generate.log"
+
+      - name: Open an issue when the generator fails
+        if: steps.compare.outputs.changed == 'true' && steps.generate.outputs.ok == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "The published API document changed and the generator failed on it."
+            echo
+            echo '```'
+            tail -n 100 "$RUNNER_TEMP/generate.log"
+            echo '```'
+            echo
+            cat "$RUNNER_TEMP/extension.md"
+          } > "$RUNNER_TEMP/issue.md"
+          gh issue create --title "The generator failed on the published API document" --body-file "$RUNNER_TEMP/issue.md"
+
+      - name: Run the tests
+        id: tests
+        if: steps.compare.outputs.changed == 'true' && steps.generate.outputs.ok == 'true'
+        run: |
+          if pnpm typecheck > "$RUNNER_TEMP/tests.log" 2>&1 && pnpm test >> "$RUNNER_TEMP/tests.log" 2>&1; then
+            echo "result=passed" >> "$GITHUB_OUTPUT"
+          else
+            echo "result=failed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open or update the pull request
+        if: steps.compare.outputs.changed == 'true' && steps.generate.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ steps.tests.outputs.result }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -C "$BRANCH"
+          git add openapi.json src/generated
+          git commit -m "Update the API document snapshot"
+          git push --force origin "$BRANCH"
+          {
+            echo "The published API document changed. The snapshot and the generated code are updated here."
+            echo
+            echo "Tests and types after regenerating: **$RESULT**. A failing contract test is the to-do list: a new operation, error code or request state needs its method, mapping or handling."
+            echo
+            cat "$RUNNER_TEMP/extension.md"
+            echo
+            cat "$RUNNER_TEMP/oasdiff.md"
+            echo
+            echo "<details><summary>Test output</summary>"
+            echo
+            echo '```'
+            tail -n 150 "$RUNNER_TEMP/tests.log"
+            echo '```'
+            echo "</details>"
+          } > "$RUNNER_TEMP/body.md"
+          gh label create "spec: tests passed" --force --color 0e8a16
+          gh label create "spec: tests failed" --force --color d93f0b
+          label="spec: tests $RESULT"
+          if [ "$RESULT" = passed ]; then other="spec: tests failed"; else other="spec: tests passed"; fi
+          if gh pr view "$BRANCH" --json state --jq .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$BRANCH" --body-file "$RUNNER_TEMP/body.md" --remove-label "$other" --add-label "$label"
+          else
+            gh pr create --head "$BRANCH" --title "Update the API document snapshot" --body-file "$RUNNER_TEMP/body.md" --label "$label"
+          fi
+
+  watch-other-sdk:
+    name: Check the Python SDK's daily job is on
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue if its spec.yml is disabled
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          state=$(gh api "repos/$OTHER_REPO/actions/workflows/spec.yml" --jq .state 2>/dev/null || echo unreadable)
+          echo "$OTHER_REPO spec.yml: $state"
+          case "$state" in
+            active) exit 0 ;;
+            unreadable) echo "::warning::Could not read the workflow's state"; exit 0 ;;
+          esac
+          title="The daily API document check in $OTHER_REPO is $state"
+          if [ -z "$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "in:title \"$title\"" --json number --jq '.[].number')" ]; then
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "GitHub turns scheduled workflows off after 60 days without activity. Turn it back on with: gh workflow enable spec.yml -R $OTHER_REPO"
+          fi

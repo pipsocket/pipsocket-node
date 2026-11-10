@@ -1,0 +1,10 @@
+name: Feature request
+description: Something the SDK could do that it doesn't.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What you'd like, and what it's for
+    validations:
+      required: true
