@@ -2,7 +2,7 @@
 
 TypeScript client for the Pipsocket API: REST and WebSocket access to MetaTrader 5 accounts hosted by Pipsocket.
 
-> This is an alpha. It has every REST call. The stream helper comes in the next release.
+> This is an alpha: the API it calls is stable, but this package may still change between minor versions.
 
 ## Why
 
@@ -82,6 +82,42 @@ switch (order.kind) {
 ```
 
 Every call is for one account, so the client gives you a handle per account. Field names are the API's own (`type_filling`, `price_open`), as in the [API reference](https://docs.pipsocket.com).
+
+## Streaming
+
+The stream pushes what happens on the account as it happens: fills, deals, prices, the account every second. On Node it needs the `ws` package:
+
+```bash
+npm install pipsocket ws
+```
+
+```ts
+import { isEvent, Pipsocket } from "pipsocket";
+
+const acct = new Pipsocket().account("acc_01m6tx3k9f2qw8r7bznd5yvh4c");
+const stream = acct.stream({ ticks: ["EURUSD"] });
+
+for await (const event of stream) {
+  if (isEvent(event, "resync")) console.log("baseline", event.reason, event.positions?.length, "positions");
+  else if (isEvent(event, "tick")) console.log(event.symbol, event.bid, event.ask);
+  else if (isEvent(event, "request")) console.log("request", event.request, event.state);
+  else console.log(event.type);
+}
+```
+
+The events are the API's messages as they are (see [the WebSocket stream](https://docs.pipsocket.com/websocket)), plus one the helper adds: `resync`. A message of a type added later is passed on too, so `isEvent(event, "tick")` is how to narrow one to its known shape. The helper reconnects by itself, with backoff, sends your tick set again, pings the socket every 20 seconds, and after every connect and every gap yields a `resync` event. `stream.setTicks(symbols)` changes the tick set; `stream.close()`, or leaving the loop, stops it.
+
+What a `resync` gives, and what it doesn't:
+
+- **A new baseline for state.** `account`, `positions` and `orders` as REST showed them after the subscription was live: replace your own state with them. `positions` and `orders` are `null` when the terminal isn't running, which is not the same as empty.
+- **Every deal, request, transaction and status event** the socket carried from the subscription on, delivered after the `resync` when it finishes without another gap. `account` and `tick` events are thinned during a resync: the next `account` event comes within a second, and only the newest tick per symbol is kept.
+- **Not one moment in time.** The reads happen one after another, so a position can change between them.
+- **Not an order between events and the snapshot.** An event delivered after a resync can describe something older than the snapshot. Events are notices, not deltas: never add them to or subtract them from the snapshot. Deduplicate deals and orders by ticket and requests by id, and read again when exact state matters.
+- **Not the past in full.** Ticks and transaction events from a gap are gone. Deals and past orders are read back from history since the last checkpoint, best effort, in `history`; when there is none, `history_reason` says why (`no_checkpoint`, `account_changed`, `range_too_large` or `unavailable`).
+
+`reason` is `connected`, `reconnected`, `lagged` (the server dropped events), `host_back` (the account's host or terminal came back) or `overflow` (your loop fell behind and the helper's own queue filled). Pass `snapshot: false` to get the `resync` event without the reads. `queueSize` (1000 by default) is how many events the helper holds for you before it treats a backlog as a gap.
+
+A refused key or account (401, 404) ends the stream with that error, as does a key rolled while it was open, at the stream's next read (or a `requests.wait` lookup's). A network failure never ends it on Node: it keeps reconnecting, with backoff, until you close it. On Bun, and on Deno without `ws`, the WebSocket can't say why an upgrade failed, so the stream checks with a REST read: a 401 or 404 there ends it at once, and if the API answers but the upgrade keeps failing five times running, it ends with `StreamHandshakeError` (see Runtimes). An open stream also helps `requests.wait`: a request event ends the wait as soon as it arrives, and a trade call never reports a request as pending once the stream has shown it final.
 
 ## Every call
 
@@ -212,12 +248,15 @@ Cancel a call with an `AbortSignal`: the call throws the signal's reason as it i
 
 ## Runtimes
 
-| Runtime            | REST          |
-| ------------------ | ------------- |
-| Node 22 and later  | yes           |
-| Bun, Deno          | yes           |
-| Cloudflare Workers | yes           |
-| Browsers           | no, by design |
+| Runtime            | REST          | Stream                                                         |
+| ------------------ | ------------- | -------------------------------------------------------------- |
+| Node 22 and later  | yes           | yes, with the `ws` package                                     |
+| Bun                | yes           | yes, with its own WebSocket                                    |
+| Deno 2.5 and later | yes           | yes, with the `ws` package (recommended), or its own WebSocket |
+| Cloudflare Workers | yes           | no                                                             |
+| Browsers           | no, by design | no                                                             |
+
+With `ws`, the stream sees why an upgrade was refused: a 401 or 404 ends it at once, and `close()` drops the connection at once. Bun's WebSocket, and Deno's own without `ws`, can't say why an upgrade was refused, so after a failed upgrade the stream makes one REST read with the same key: a 401 or 404 there ends the stream, and if the API answers and the upgrade still fails five times running, the stream ends with `StreamHandshakeError`. Deno's own WebSocket also waits for the server to answer its close, so a stream closed while the network is dead can keep the process up until the connection times out. A runtime that needs another WebSocket client can pass its own adapter as `socket`.
 
 The client refuses to start in a browser: the API doesn't answer browsers' cross-origin requests, and an API key in a web page would leak. Call the API from your server.
 

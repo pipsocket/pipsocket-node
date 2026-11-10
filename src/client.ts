@@ -1,8 +1,10 @@
 import { type AttemptResult, attempt, type FetchLike, type HttpRequest } from "./attempt.js";
 import { backoffMs, type CallKind, interpret } from "./core.js";
-import { APITimeoutError, AuthenticationError, NotFound, OutcomeUnknown, PipsocketError } from "./errors.js";
+import { APIError, APITimeoutError, OutcomeUnknown, PipsocketError } from "./errors.js";
 import { OPERATIONS, type OperationId } from "./generated/tables.js";
-import { isFinal, type TradeRequest } from "./trade-request.js";
+import { isFatal, type Read } from "./stream/machine.js";
+import { AccountStream, type StreamOptions } from "./stream/stream.js";
+import { isFinal, isOutstanding, isRecordedRequest, type TradeRequest, tradeRequestFrom } from "./trade-request.js";
 import type {
   AccountView,
   CheckView,
@@ -211,6 +213,9 @@ export class Pipsocket {
       send: (spec, options) => this.#send(accountId, spec, options),
       clock: this.#clock,
       timeoutMs: this.timeoutMs,
+      random: this.#random,
+      streamUrl: `${this.streamUrl}/v1/accounts/${encodeURIComponent(accountId)}/stream`,
+      streamHeaders: () => ({ Authorization: `Bearer ${this.#apiKey}`, "User-Agent": this.#userAgent }),
     });
   }
 
@@ -293,6 +298,9 @@ const DOCUMENTED_CODES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
   OPERATIONS.map((op) => [op.operationId, new Set<string>(op.codes)]),
 );
 
+/** How many settled requests an account handle remembers, to rank slower answers against. */
+const SETTLED_REMEMBERED = 1000;
+
 /** A new idempotency key (a UUID). Make one, save it, then pass it as `idempotencyKey`. */
 export function newKey(): string {
   return crypto.randomUUID();
@@ -340,6 +348,11 @@ interface AccountContext {
   send: Send;
   clock: Clock;
   timeoutMs: number;
+  random: () => number;
+  /** wss://.../v1/accounts/{account}/stream */
+  streamUrl: string;
+  /** The upgrade request's headers, the key included. */
+  streamHeaders: () => Record<string, string>;
 }
 
 /** The calls for one account. Get one with `Pipsocket.account(id)`. */
@@ -355,7 +368,7 @@ export class Account {
     this.#send = context.send;
   }
 
-  #trade(
+  async #trade(
     operation: OperationId,
     method: CallSpec["method"],
     path: string,
@@ -364,7 +377,33 @@ export class Account {
   ): Promise<TradeRequest> {
     const spec: CallSpec = { call: "trade", method, path, operation };
     if (body !== undefined) spec.body = body;
-    return this.#send(spec, options) as Promise<TradeRequest>;
+    return this.#reconcile((await this.#send(spec, options)) as TradeRequest);
+  }
+
+  /** Requests seen final, by id, most recent last: a slower outstanding answer can't undo them. */
+  readonly #settled = new Map<string, TradeRequest>();
+
+  /**
+   * Ranks what is known about a request: outstanding below final. A request seen final (on the
+   * stream, or in an earlier answer) is never moved back to pending or unknown by a slower answer.
+   */
+  #reconcile(request: TradeRequest): TradeRequest {
+    if (isFinal(request)) {
+      this.#settled.delete(request.id);
+      this.#settled.set(request.id, request);
+      if (this.#settled.size > SETTLED_REMEMBERED) {
+        const oldest = this.#settled.keys().next().value;
+        if (oldest !== undefined) this.#settled.delete(oldest);
+      }
+      return request;
+    }
+    const known = this.#settled.get(request.id);
+    if (!known || !isOutstanding(request)) return request;
+    const settled: TradeRequest = { ...known };
+    delete settled.idempotencyKey;
+    delete settled.httpStatus;
+    if (request.idempotencyKey !== undefined) settled.idempotencyKey = request.idempotencyKey;
+    return settled;
   }
 
   /** The account: login, status, connection, and balance, equity and margin. */
@@ -408,10 +447,12 @@ export class Account {
   readonly requests = {
     /** A recorded trade request, by id, whatever its state. */
     get: async (id: string, options?: CallOptions): Promise<TradeRequest> =>
-      this.#send(
-        { call: "lookup", method: "GET", path: `/requests/${encodeURIComponent(nonEmpty("The request id", id))}` },
-        options,
-      ) as Promise<TradeRequest>,
+      this.#reconcile(
+        (await this.#send(
+          { call: "lookup", method: "GET", path: `/requests/${encodeURIComponent(nonEmpty("The request id", id))}` },
+          options,
+        )) as TradeRequest,
+      ),
     /**
      * Looks the request up until it is final or `timeoutMs` passes, then returns it as it stands
      * (still `pending` or `unknown`, perhaps). It never throws for "still pending" and sends nothing
@@ -431,35 +472,148 @@ export class Account {
     let interval = 250;
     let latest: TradeRequest | undefined;
     let lastError: unknown;
-    for (;;) {
-      const remaining = deadline - clock.now();
-      if (remaining <= 0) {
-        if (signal?.aborted) throw signal.reason;
-        if (latest) return latest;
-        throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
+    // A final state seen on an open stream ends the wait early: whichever comes first wins.
+    let seenFinal: TradeRequest | undefined;
+    const woken = new AbortController();
+    const listener = (request: TradeRequest) => {
+      if (isFinal(request) && !seenFinal) {
+        seenFinal = request;
+        woken.abort();
       }
-      // Each lookup is one attempt, bounded by the time left.
-      const lookupOptions: CallOptions = {
-        maxRetries: 0,
-        timeoutMs: Math.min(this.#context.timeoutMs, remaining),
-      };
-      if (signal) lookupOptions.signal = signal;
-      try {
-        latest = await this.requests.get(id, lookupOptions);
-        if (isFinal(latest)) return latest;
-      } catch (error) {
-        if (signal?.aborted) throw signal.reason;
-        if (error instanceof AuthenticationError || error instanceof NotFound) throw error;
-        lastError = error;
+    };
+    this.#watch(id, listener);
+    const sleepSignal = signal ? AbortSignal.any([signal, woken.signal]) : woken.signal;
+    try {
+      for (;;) {
+        if (seenFinal) return seenFinal;
+        const remaining = deadline - clock.now();
+        if (remaining <= 0) {
+          if (signal?.aborted) throw signal.reason;
+          if (latest) return latest;
+          throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
+        }
+        // Each lookup is one attempt, bounded by the time left.
+        const lookupOptions: CallOptions = {
+          maxRetries: 0,
+          timeoutMs: Math.min(this.#context.timeoutMs, remaining),
+        };
+        // A final state on the stream cuts a lookup in flight short: whichever comes first wins.
+        lookupOptions.signal = sleepSignal;
+        try {
+          latest = await this.requests.get(id, lookupOptions);
+          if (isFinal(latest)) return latest;
+        } catch (error) {
+          if (signal?.aborted) throw signal.reason;
+          if (seenFinal) return seenFinal;
+          // A 401 or 404 won't mend, whatever its code (or none). The key or the account gone ends
+          // the open streams too: they can't resync any more.
+          if (error instanceof APIError && (error.status === 401 || error.status === 404)) {
+            if (isFatal(error)) for (const fail of this.#fatalWatchers) fail(error);
+            throw error;
+          }
+          lastError = error;
+        }
+        if (seenFinal) return seenFinal;
+        const left = deadline - clock.now();
+        if (left <= 0) {
+          if (signal?.aborted) throw signal.reason;
+          if (latest) return latest;
+          throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
+        }
+        try {
+          await clock.sleep(Math.min(interval, left), sleepSignal);
+        } catch (reason) {
+          if (signal?.aborted) throw signal.reason;
+          if (!seenFinal) throw reason;
+        }
+        interval = Math.min(interval * 1.5, 2000);
       }
-      const left = deadline - clock.now();
-      if (left <= 0) {
-        if (signal?.aborted) throw signal.reason;
-        if (latest) return latest;
-        throw lastError ?? new APITimeoutError(`No lookup of ${id} answered within ${timeoutMs / 1000} s`);
+    } finally {
+      this.#unwatch(id, listener);
+    }
+  }
+
+  /** requests.wait calls in progress, by request id: an open stream tells them what it sees. */
+  readonly #watchers = new Map<string, Set<(request: TradeRequest) => void>>();
+
+  #watch(id: string, listener: (request: TradeRequest) => void): void {
+    const set = this.#watchers.get(id) ?? new Set();
+    set.add(listener);
+    this.#watchers.set(id, set);
+  }
+
+  #unwatch(id: string, listener: (request: TradeRequest) => void): void {
+    const set = this.#watchers.get(id);
+    set?.delete(listener);
+    if (set?.size === 0) this.#watchers.delete(id);
+  }
+
+  #requestSeen(request: TradeRequest): void {
+    const reconciled = this.#reconcile(request);
+    for (const listener of this.#watchers.get(request.id) ?? []) listener(reconciled);
+  }
+
+  /** Open streams, told when a read outside them finds the key or the account gone. */
+  readonly #fatalWatchers = new Set<(error: PipsocketError) => void>();
+
+  /**
+   * The account's stream of events: the API's messages as they are, and a `resync` event after
+   * every connect and gap, with a fresh snapshot to replace your state with. On Node it needs the
+   * ws package (npm install ws).
+   *
+   * ```ts
+   * const stream = acct.stream({ ticks: ["EURUSD"] })
+   * for await (const event of stream) console.log(event.type)
+   * ```
+   */
+  stream(options: StreamOptions = {}): AccountStream {
+    const context = this.#context;
+    return new AccountStream(
+      {
+        url: context.streamUrl,
+        headers: context.streamHeaders,
+        random: context.random,
+        read: (read, signal) => this.#streamRead(read, signal),
+        requestSeen: (message) => {
+          if (isRecordedRequest(message)) this.#requestSeen(tradeRequestFrom(message));
+        },
+        watchFatal: (fail) => {
+          this.#fatalWatchers.add(fail);
+          return () => this.#fatalWatchers.delete(fail);
+        },
+      },
+      options,
+    );
+  }
+
+  /** The REST reads the stream helper makes: each is one call, and the helper retries. */
+  async #streamRead(read: Read, signal: AbortSignal): Promise<unknown> {
+    // One attempt each: the stream's machine decides when to try again.
+    const options: CallOptions = { signal, maxRetries: 0 };
+    switch (read.what) {
+      case "account":
+      case "probe":
+        return this.get(options);
+      case "positions":
+        return this.positions.list(options);
+      case "orders":
+        return this.orders.list(options);
+      case "deals":
+        return this.history.deals({ from: read.from, to: read.to }, options);
+      case "history_orders":
+        return this.history.orders({ from: read.from, to: read.to }, options);
+      case "watched": {
+        // Look up every request a wait() is waiting on. A 401 or a 404 for the account ends the
+        // stream; other failures are left to wait()'s own polling.
+        for (const id of [...this.#watchers.keys()]) {
+          try {
+            this.#requestSeen(await this.requests.get(id, options));
+          } catch (error) {
+            if (isFatal(error)) throw error;
+          }
+        }
+        return null;
       }
-      await clock.sleep(Math.min(interval, left), signal);
-      interval = Math.min(interval * 1.5, 2000);
     }
   }
 

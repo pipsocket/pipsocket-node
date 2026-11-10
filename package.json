@@ -39,6 +39,14 @@
   "engines": {
     "node": ">=22"
   },
+  "peerDependencies": {
+    "ws": "^8.17.1"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json",
     "check": "pnpm lint && pnpm typecheck && pnpm generate:check && pnpm test",
@@ -51,12 +59,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "pack:check": "node scripts/pack-check.mjs"
   },
-  "packageManager": "pnpm@10.20.0",
   "devDependencies": {
     "@biomejs/biome": "2.6.6",
     "@types/node": "22.20.5",
+    "@types/ws": "8.18.1",
     "openapi-typescript": "7.13.0",
     "typescript": "5.9.3",
-    "vitest": "4.1.12"
-  }
+    "vitest": "4.1.12",
+    "ws": "8.18.3"
+  },
+  "packageManager": "pnpm@10.20.0"
 }
