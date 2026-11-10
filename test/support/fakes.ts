@@ -1,6 +1,6 @@
 // A scripted fetch and a clock that never really waits. Used through the real client.
 
-import type { Clock, FetchLike } from "../../src/index.js";
+import { type Clock, type FetchLike, markNotSent } from "../../src/index.js";
 
 export interface SentAttempt {
   method: string;
@@ -97,7 +97,10 @@ export class ScriptedFetch {
     if (this.clock && step.elapsedMs) this.clock.current += step.elapsedMs;
     const { answer } = step;
     if (typeof answer === "function") return answer(request, init.signal ?? undefined);
-    if ("fail" in answer) throw networkError(answer.fail === "connect" ? "ECONNREFUSED" : "ECONNRESET");
+    // A connection that never opened is marked so; a reset after writing is any other failure.
+    if ("fail" in answer) {
+      throw answer.fail === "connect" ? markNotSent(networkError("ECONNREFUSED")) : networkError("ECONNRESET");
+    }
     return responseFor(answer.respond);
   }
 }

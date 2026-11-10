@@ -1,11 +1,14 @@
-export type { FetchLike } from "./attempt.js";
+export { type FetchLike, markNotSent } from "./attempt.js";
 export {
   Account,
   type CallOptions,
   type ClientOptions,
   type Clock,
   type HistoryRange,
+  newKey,
   Pipsocket,
+  type TradeCallOptions,
+  type WaitOptions,
 } from "./client.js";
 export {
   AccountUnavailable,

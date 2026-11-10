@@ -40,7 +40,10 @@ export interface MockApi {
   calls: Array<{ method: string; path: string }>;
 }
 
-export function mockApi(): MockApi {
+/** `answer` replaces the document's example for the calls it returns an answer for. */
+export function mockApi(
+  answer?: (method: string, path: string) => { status: number; body: unknown } | undefined,
+): MockApi {
   const calls: MockApi["calls"] = [];
   const fetch = async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
@@ -50,7 +53,7 @@ export function mockApi(): MockApi {
     if (url.origin !== "https://api.pipsocket.com" || !route) {
       return Response.json({ error: "no_such_route", message: `${method} ${url.pathname}` }, { status: 404 });
     }
-    const { status, body } = successExample(route.operation);
+    const { status, body } = answer?.(method, url.pathname) ?? successExample(route.operation);
     return Response.json(body, { status });
   };
   return { fetch, calls };

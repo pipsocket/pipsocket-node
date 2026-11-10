@@ -2,6 +2,9 @@ import type { Blocking, KillSwitchView } from "./types.js";
 
 /** The base of every error this SDK raises itself. */
 export class PipsocketError extends Error {
+  /** On every error from a trade call: the key it sent, to retry later with the same one. */
+  idempotencyKey?: string;
+
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
@@ -129,7 +132,7 @@ export interface OutcomeUnknownFields {
  * `cause` is the last error the call saw.
  */
 export class OutcomeUnknown extends PipsocketError {
-  readonly idempotencyKey: string;
+  declare idempotencyKey: string;
   declare readonly cause: PipsocketError;
   /** The HTTP status of the last answer, or null when the last attempt got none. */
   readonly status: number | null;

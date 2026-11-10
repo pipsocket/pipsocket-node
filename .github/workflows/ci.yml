@@ -78,7 +78,7 @@ jobs:
           bun-version: 1.4.3
       - run: pnpm install --frozen-lockfile
       - name: REST tests under Bun
-        run: bun --bun node_modules/vitest/vitest.mjs run test/conformance.test.ts test/client.test.ts test/readme.test.ts
+        run: bun --bun node_modules/vitest/vitest.mjs run test/conformance.test.ts test/client.test.ts test/trade.test.ts test/network.test.ts test/readme.test.ts
 
   deno:
     name: Tests (Deno)
@@ -97,4 +97,4 @@ jobs:
           deno-version: 2.9.6
       - run: pnpm install --frozen-lockfile
       - name: REST tests under Deno
-        run: deno run --allow-all node_modules/vitest/vitest.mjs run test/conformance.test.ts test/client.test.ts test/readme.test.ts
+        run: deno run --allow-all node_modules/vitest/vitest.mjs run test/conformance.test.ts test/client.test.ts test/trade.test.ts test/network.test.ts test/readme.test.ts
