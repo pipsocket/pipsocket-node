@@ -963,3 +963,55 @@ test.each(["positions", "deals", "history_orders"] as const)(
     expect(deals.from).toBe(ACCOUNT.server_time + 10_000 - TIMING.historyMarginS);
   },
 );
+
+describe("the checkpoint follows the order the caller takes events, in any state", () => {
+  test("an unrecovered resync taken while another resync runs still holds the checkpoint", () => {
+    const d = connectedLive();
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    // Resync B can't read the terminal; it and a later account event wait in the queue.
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 });
+    d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+    d.answer("watched", null);
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 20_000 });
+    // Resync C starts; the caller takes B while it runs, then the socket drops.
+    d.message({ type: "lagged", missed: 2 });
+    expect(d.state).toBe("syncing");
+    const taken: string[] = [];
+    while (!taken.includes("resync")) taken.push(d.machine.take()?.type ?? "none");
+    expect(taken).toEqual(["lagged", "resync"]);
+    d.feed({ type: "closed" });
+    expect(d.state).toBe("backoff");
+    // The account event is taken during the backoff, after B.
+    expect(d.machine.take()?.type).toBe("account");
+    d.feed({ type: "timer", name: "backoff" });
+    d.subscribe();
+    d.answerTicks();
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 30_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+
+  test("a first checkpoint still queued, then an unrecovered resync: the checkpoint holds once both are taken", () => {
+    const d = new Driver();
+    d.feed({ type: "start" });
+    d.subscribe();
+    d.completeResync(); // A: the first checkpoint, at T, still queued
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 });
+    d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+    d.answer("watched", null); // B: unrecovered, queued behind A
+    d.drain();
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 30_000 });
+    d.drain();
+    d.message({ type: "lagged", missed: 2 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 40_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+});

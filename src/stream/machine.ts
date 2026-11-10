@@ -217,7 +217,7 @@ export class StreamMachine {
   /**
    * The caller has taken a resync that didn't recover its gap (the terminal away for the snapshot
    * or history): the checkpoint stays put, account events included, until the caller takes one that
-   * did. Both are applied in the order the caller takes them.
+   * did. Both are applied in the order the caller takes them, in any state.
    */
   #unrecoveredGap = false;
   /** Resync events queued that didn't recover their gap. */
@@ -251,7 +251,8 @@ export class StreamMachine {
 
   /**
    * Bookkeeping for an event the caller has now received: its tickets, for leaving them out of
-   * history read back later, and the checkpoint, which stays frozen while a resync runs.
+   * history read back later, and the checkpoint. A resync in progress reads from the checkpoint it
+   * started with, so what the caller takes meanwhile doesn't change its range.
    */
   #delivered(event: QueuedEvent): void {
     // An event from before a login change says nothing about the new login.
@@ -264,14 +265,19 @@ export class StreamMachine {
       for (const deal of history?.deals ?? []) this.#rememberTicket(this.#deliveredDeals, deal.ticket);
       for (const order of history?.orders ?? []) this.#rememberTicket(this.#deliveredOrders, order.ticket);
     }
-    if (this.state === "syncing") return;
+    // The checkpoint follows the order the caller takes events, whatever state the machine is in.
+    // A resync in progress isn't affected: it reads from the checkpoint it started with.
     const committed = this.#checkpointOnTake.get(event);
     if (committed) {
-      this.#checkpoint = committed;
+      const current = this.#checkpoint;
+      this.#checkpoint =
+        current && current.login === committed.login && current.server === committed.server
+          ? { ...committed, serverTime: Math.max(committed.serverTime, current.serverTime) }
+          : committed;
       this.#unrecoveredGap = false;
     } else if (this.#leavesGap.has(event)) {
       this.#unrecoveredGap = true;
-    } else if (!this.#unrecoveredGap) {
+    } else {
       this.#advanceCheckpoint(event);
     }
   }
@@ -728,8 +734,9 @@ export class StreamMachine {
         server: account.server,
       });
     }
-    // A gap needs recovering only from a checkpoint; without one, account events set the first.
-    if (unavailable && resync.checkpoint) this.#leavesGap.add(event);
+    // Marked whatever checkpoint this resync started with: the caller may take an earlier resync
+    // that sets one before it takes this one.
+    if (unavailable) this.#leavesGap.add(event);
     const terminalBack = unavailable && this.#terminalBackDuringResync;
     this.#resync = null;
     this.state = "live";
@@ -927,6 +934,8 @@ export class StreamMachine {
   #advanceCheckpoint(event: QueuedEvent): void {
     if (event.type !== "account" || typeof event.server_time !== "number" || !this.#baseline) return;
     const current = this.#checkpoint;
+    // A gap not yet recovered holds the checkpoint where it is; with none yet, this sets the first.
+    if (this.#unrecoveredGap && current) return;
     if (current && (current.login !== this.#baseline.login || current.server !== this.#baseline.server)) return;
     this.#checkpoint = {
       serverTime: Math.max(event.server_time, current?.serverTime ?? 0),
