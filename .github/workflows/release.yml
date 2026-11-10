@@ -85,7 +85,7 @@ jobs:
       - name: Publish with provenance
         env:
           DIST_TAG: ${{ needs.verify.outputs.dist-tag }}
-        run: npm publish package/*.tgz --access public --provenance --tag "$DIST_TAG"
+        run: npm publish ./package/*.tgz --access public --provenance --tag "$DIST_TAG"
 
   github-release:
     needs: [verify, publish]
