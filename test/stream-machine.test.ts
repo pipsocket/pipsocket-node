@@ -928,3 +928,38 @@ test("after a resync that couldn't read history, account events don't move the c
   const after = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
   expect(after.from).toBe(ACCOUNT.server_time + 30_000 - TIMING.historyMarginS);
 });
+
+test.each(["positions", "deals", "history_orders"] as const)(
+  "a recovered resync taken before a later one that couldn't read %s doesn't clear that gap",
+  (failing) => {
+    const d = connectedLive();
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    // Resync A recovers, and stays in the queue.
+    d.message({ type: "lagged", missed: 1 });
+    d.completeResync({ account: { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 } });
+    // Resync B can't read the terminal, and is queued behind A.
+    d.message({ type: "lagged", missed: 2 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 20_000 });
+    const away = err(AccountUnavailable, 503, "account_not_connected");
+    if (failing === "positions") {
+      d.refuse("positions", away);
+    } else {
+      d.answer("positions", []);
+      d.answer("orders", []);
+      if (failing === "history_orders") d.answer("deals", []);
+      d.refuse(failing, away);
+    }
+    d.answer("watched", null);
+    expect(d.resyncs().map((r) => r.history_reason)).toEqual([null, "unavailable"]);
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 30_000 });
+    d.drain();
+    d.message({ type: "lagged", missed: 3 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 40_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    // From A's checkpoint, the last one recovered: B's gap is read back.
+    expect(deals.from).toBe(ACCOUNT.server_time + 10_000 - TIMING.historyMarginS);
+  },
+);
