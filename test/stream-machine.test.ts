@@ -1065,3 +1065,43 @@ test("with snapshot: false, a status event during a resync doesn't start another
   d.answer("watched", null);
   expect(d.state).toBe("live");
 });
+
+describe("a resync that read no history since the current checkpoint leaves its gap unrecovered", () => {
+  test("one that started before the first checkpoint was taken", () => {
+    const d = new Driver();
+    d.feed({ type: "start" });
+    d.subscribe();
+    d.completeResync(); // A: the first checkpoint, at T, queued
+    d.message({ type: "lagged", missed: 1 }); // B starts, with no checkpoint taken yet
+    d.drain(); // A taken while B runs
+    d.completeResync({ account: { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 } });
+    expect(d.resyncs()[0]?.history_reason).toBe("no_checkpoint");
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 30_000 });
+    d.drain();
+    d.message({ type: "lagged", missed: 2 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 40_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+
+  test("one that started before a new login's first checkpoint was taken", () => {
+    const d = connectedLive();
+    const login = { ...ACCOUNT, login: 777 };
+    d.message({ type: "lagged", missed: 1 });
+    d.completeResync({ account: login }); // A: account_changed, the new login's first checkpoint, queued
+    d.message({ type: "lagged", missed: 2 }); // B starts before A is taken
+    d.drain(); // A taken while B runs
+    d.completeResync({ account: { ...login, server_time: ACCOUNT.server_time + 10_000 } });
+    d.drain();
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 30_000 });
+    d.drain();
+    d.message({ type: "lagged", missed: 3 });
+    d.answer("account", { ...login, server_time: ACCOUNT.server_time + 40_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+});

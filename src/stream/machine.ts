@@ -281,7 +281,9 @@ export class StreamMachine {
           ? { ...committed, serverTime: Math.max(committed.serverTime, current.serverTime) }
           : committed;
       this.#unrecoveredGap = false;
-    } else if (this.#leavesGap.has(event)) {
+    } else if (this.#leavesGap.has(event) || (event.type === "resync" && this.#checkpoint)) {
+      // A resync that recovered nothing since the current checkpoint (it found the terminal away, or
+      // it started before that checkpoint was set and read no history) leaves its gap unrecovered.
       this.#unrecoveredGap = true;
     } else {
       this.#advanceCheckpoint(event);
