@@ -211,6 +211,11 @@ export class StreamMachine {
   #terminalBackDuringResync = false;
   /** For each resync event queued, the checkpoint to commit when the caller takes it. */
   #checkpointOnTake = new WeakMap<object, Checkpoint>();
+  /** Bumped when the account's login or server changes; each queued event keeps the one it came in. */
+  #identity = 0;
+  #identityOf = new WeakMap<object, number>();
+  /** A login or server change seen and not yet reported on a queued resync event. */
+  #identityChangePending = false;
   #deliveredDeals = new Set<number>();
   #deliveredOrders = new Set<number>();
   #nextId = 1;
@@ -241,6 +246,8 @@ export class StreamMachine {
    * history read back later, and the checkpoint, which stays frozen while a resync runs.
    */
   #delivered(event: QueuedEvent): void {
+    // An event from before a login change says nothing about the new login.
+    if (this.#identityOf.get(event) !== this.#identity) return;
     if (event.type === "deal") this.#rememberDeal(event as StreamMessage);
     if (event.type === "resync") {
       const history = (event as ResyncEvent).history;
@@ -560,7 +567,7 @@ export class StreamMachine {
       step: sendTicks ? "ticks" : "account",
       waitingOn: null,
       retries: 0,
-      checkpoint: this.#checkpoint,
+      checkpoint: this.#identityChangePending ? null : this.#checkpoint,
       account: null,
       positions: null,
       orders: null,
@@ -570,7 +577,7 @@ export class StreamMachine {
       slices: [],
       deals: [],
       historyOrders: [],
-      identityChanged: false,
+      identityChanged: this.#identityChangePending,
     };
   }
 
@@ -687,7 +694,8 @@ export class StreamMachine {
       history: resync.history,
       history_reason: resync.history ? null : resync.historyReason,
     };
-    const unavailable = resync.positions === null || resync.orders === null;
+    // The terminal away for the snapshot or for the history: nothing recovered past the checkpoint.
+    const unavailable = resync.positions === null || resync.orders === null || resync.historyReason === "unavailable";
     if (resync.account) this.#terminalAway = unavailable;
     // The checkpoint moves only when the caller takes a resync that recovered the account: one
     // with the terminal unavailable reads from the same checkpoint next time.
@@ -718,7 +726,9 @@ export class StreamMachine {
       this.#queue = [];
       return [...actions, ...this.#startResync("overflow")];
     }
+    for (const queued of batch) this.#identityOf.set(queued, this.#identity);
     this.#queue.push(...batch);
+    if (resync.identityChanged) this.#identityChangePending = false;
     actions.push({ type: "wake" });
     // The terminal came back while this resync found it away: read again now it is there.
     if (terminalBack) actions.push(...this.#startResync("host_back"));
@@ -743,6 +753,8 @@ export class StreamMachine {
         if (baseline && (account.login !== baseline.login || account.server !== baseline.server)) {
           // Another login now: nothing from the old one says anything about this one.
           this.#forgetAccount();
+          this.#identity += 1;
+          this.#identityChangePending = true;
           resync.checkpoint = null;
           resync.identityChanged = true;
         }
@@ -775,6 +787,8 @@ export class StreamMachine {
   }
 
   #readFailed(id: number, error: unknown): Action[] {
+    // A rolled key or a missing account ends the stream, even when the read was superseded.
+    if (isFatal(error)) return this.#fail(error as PipsocketError);
     if (id === this.#handshakeProbeId && this.state === "connecting") return this.#handshakeProbeAnswered(false, error);
     if (id === this.#probeId && this.state === "host_away") {
       this.#probeId = null;
@@ -883,6 +897,7 @@ export class StreamMachine {
       const actions = this.state === "syncing" ? this.#restartResync("overflow") : this.#startResync("overflow");
       return [...actions, ...this.#duringResync(event as StreamMessage)];
     }
+    this.#identityOf.set(event, this.#identity);
     this.#queue.push(event);
     return [{ type: "wake" }];
   }

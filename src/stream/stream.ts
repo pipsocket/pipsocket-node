@@ -1,7 +1,7 @@
 // The shell around the stream state machine: it opens sockets, runs timers, makes the REST reads
 // the machine asks for, and hands events to the caller.
 
-import type { PipsocketError } from "../errors.js";
+import { type PipsocketError, StreamError } from "../errors.js";
 import { type Action, type Input, type Read, StreamMachine, type TimerName } from "./machine.js";
 import type { StreamEvent } from "./messages.js";
 import { defaultSocket, type SocketFactory, type StreamSocket } from "./socket.js";
@@ -180,7 +180,20 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
     const current = () => generation === this.#generation && !this.#ended;
     // Closed, or moved on, while the factory loaded: open nothing.
     if (!current()) return;
-    this.#socket = factory(this.#context.url, this.#context.headers(), {
+    try {
+      this.#socket = this.#openSocket(factory, current);
+    } catch (error) {
+      // A socket that can't even be made (such as a malformed URL) ends the stream with the reason.
+      this.#end(
+        new StreamError("The stream's socket could not be opened (is streamUrl a ws:// or wss:// URL?)", {
+          cause: error,
+        }),
+      );
+    }
+  }
+
+  #openSocket(factory: SocketFactory, current: () => boolean): StreamSocket {
+    return factory(this.#context.url, this.#context.headers(), {
       opened: () => current() && this.#input({ type: "opened" }),
       text: (text) => current() && this.#input({ type: "text", text }),
       closed: () => current() && this.#input({ type: "closed" }),

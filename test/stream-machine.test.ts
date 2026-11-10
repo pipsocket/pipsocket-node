@@ -794,3 +794,62 @@ describe("more transitions", () => {
     expect(d.machine.error).toBeInstanceOf(AuthenticationError);
   });
 });
+
+describe("recovery that falls short", () => {
+  test("history unavailable keeps the checkpoint, and the terminal coming back resyncs", () => {
+    const d = connectedLive();
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    d.refuse("deals", err(AccountUnavailable, 503, "account_not_connected"));
+    d.answer("watched", null);
+    expect(d.resyncs()[0]).toMatchObject({ history: null, history_reason: "unavailable" });
+    d.message({ type: "status", status: "connected", detail: null });
+    expect(d.state).toBe("syncing");
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 20_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+
+  test("events queued before a login change don't count as delivered for the new login", () => {
+    const d = connectedLive();
+    d.message({ type: "deal", deal: { ticket: 500 } }); // the old login's deal, not taken yet
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, login: 777 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    d.answer("watched", null);
+    d.drain();
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    d.message({ type: "lagged", missed: 1 });
+    d.completeResync({ account: { ...ACCOUNT, login: 777 } }, { deals: [{ ticket: 500 }] });
+    expect(d.resyncs()[0]?.history?.deals).toEqual([{ ticket: 500 }]);
+  });
+
+  test("a login change is still reported after the resync that saw it restarts", () => {
+    const d = connectedLive();
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, login: 777 });
+    d.message({ type: "lagged", missed: 2 });
+    d.completeResync({ account: { ...ACCOUNT, login: 777 } });
+    expect(d.resyncs()[0]).toMatchObject({ history: null, history_reason: "account_changed" });
+  });
+
+  test("a 401 from a read already superseded still stops the helper", () => {
+    const d = connectedLive();
+    d.message({ type: "engine_disconnected" });
+    d.feed({ type: "timer", name: "probe" });
+    const probe = d.pendingRead("probe");
+    d.message({ type: "deal", deal: { ticket: 1 } }); // the host is back: a resync starts
+    d.completeResync();
+    expect(d.state).toBe("live");
+    d.feed({ type: "read_failed", id: probe.id, error: err(AuthenticationError, 401, "invalid_api_key") });
+    expect(d.state).toBe("failed");
+  });
+});

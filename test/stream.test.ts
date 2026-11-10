@@ -3,7 +3,7 @@
 // covered on every runtime the stream supports.
 
 import { afterEach, describe, expect, test } from "vitest";
-import { AuthenticationError, Pipsocket, type ResyncEvent, type StreamEvent } from "../src/index.js";
+import { AuthenticationError, Pipsocket, type ResyncEvent, StreamError, type StreamEvent } from "../src/index.js";
 import { defaultSocket, type SocketFactory } from "../src/stream/socket.js";
 import { type FakeConnection, type FakeServer, type FakeServerOptions, fakeServer } from "./support/fake-server.js";
 import { ACCOUNT_ID, API_KEY } from "./support/fakes.js";
@@ -155,6 +155,14 @@ describe("the stream's REST reads", () => {
     expect(accountReads - before).toBe(1);
     stream.close();
   }, 10_000);
+});
+
+describe("a socket that can't be made", () => {
+  test("ends the stream with StreamError, without an unhandled rejection", async () => {
+    const client = new Pipsocket({ apiKey: API_KEY, streamUrl: "not-a-url" });
+    const events = client.account(ACCOUNT_ID).stream()[Symbol.asyncIterator]();
+    await expect(events.next()).rejects.toBeInstanceOf(StreamError);
+  });
 });
 
 describe("a refusal whose body stalls", () => {
