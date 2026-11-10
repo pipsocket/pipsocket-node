@@ -23,6 +23,8 @@ export type SocketFactory = (url: string, headers: Record<string, string>, event
 
 /** The largest refusal body read from a refused handshake. */
 const REFUSAL_BODY_LIMIT = 64 * 1024;
+/** How long to wait for a refused handshake's body before reporting its status without it. */
+const REFUSAL_BODY_WAIT_MS = 1000;
 
 interface WsLike {
   on(event: "open", listener: () => void): void;
@@ -57,18 +59,20 @@ export function wsSocket(WebSocket: WsConstructor): SocketFactory {
       events.handshakeFailed(failure);
     };
     const socket = new WebSocket(url, { headers, handshakeTimeout: 30_000 });
+    // Set once the upgrade is refused: from then on, whatever else happens, the status is reported.
+    let reportRefusal: (() => void) | null = null;
     socket.on("unexpected-response", (_request, response) => {
-      // Read the refusal's body for its error code, then drop the connection.
       const status = response.statusCode ?? 0;
       const decoder = new TextDecoder();
       let body = "";
-      let reported = false;
       const report = () => {
-        if (reported) return;
-        reported = true;
+        clearTimeout(timer);
         fail({ kind: "refused", status, body: body + decoder.decode() });
         socket.terminate();
       };
+      reportRefusal = report;
+      // The body carries the error code; a body that stalls doesn't hold the status back for long.
+      const timer = setTimeout(report, REFUSAL_BODY_WAIT_MS);
       response.on("data", (chunk) => {
         if (body.length < REFUSAL_BODY_LIMIT) body += decoder.decode(chunk, { stream: true });
       });
@@ -84,9 +88,10 @@ export function wsSocket(WebSocket: WsConstructor): SocketFactory {
     socket.on("message", (data, isBinary) => {
       if (opened && !isBinary) events.text(String(data));
     });
-    socket.on("error", (error) => fail({ kind: "network", error }));
+    socket.on("error", (error) => (reportRefusal ? reportRefusal() : fail({ kind: "network", error })));
     socket.on("close", () => {
       if (opened) events.closed();
+      else if (reportRefusal) reportRefusal();
       else fail({ kind: "network", error: undefined });
     });
     return {

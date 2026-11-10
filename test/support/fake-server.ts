@@ -16,13 +16,22 @@ export interface FakeConnection {
   drop(): void;
   /** Resolves with the next text frame the client sends that `match` accepts. */
   next(match?: (text: string) => boolean): Promise<string>;
+  /** Resolves when the connection is closed, by either side. */
+  readonly closed: Promise<void>;
 }
 
 export interface FakeServerOptions {
-  /** Answers a REST call: return [status, body]. */
-  rest(request: { method: string; path: string; headers: IncomingMessage["headers"] }): [number, unknown];
-  /** Refuse the upgrade with this status and body instead of accepting it. */
-  refuse?: () => { status: number; body: unknown } | undefined;
+  /** Answers a REST call: return [status, body], or a promise of it to answer late. */
+  rest(request: {
+    method: string;
+    path: string;
+    headers: IncomingMessage["headers"];
+  }): [number, unknown] | Promise<[number, unknown]>;
+  /**
+   * Refuse the upgrade with this status and body instead of accepting it. With `stall`, the
+   * headers go and the body never comes.
+   */
+  refuse?: () => { status: number; body: unknown; stall?: boolean } | undefined;
   /** Called for every accepted socket. */
   connected?: (connection: FakeConnection) => void;
 }
@@ -41,13 +50,13 @@ export async function fakeServer(options: FakeServerOptions): Promise<FakeServer
   const connections: FakeConnection[] = [];
   const sockets = new Set<Duplex>();
   let upgrades = 0;
-  const server: Server = createServer((request: IncomingMessage, response: ServerResponse) => {
-    const [status, body] = options.rest({
+  const server: Server = createServer(async (request: IncomingMessage, response: ServerResponse) => {
+    request.resume();
+    const [status, body] = await options.rest({
       method: request.method ?? "GET",
       path: request.url ?? "/",
       headers: request.headers,
     });
-    request.resume();
     response.writeHead(status, { "content-type": "application/json" });
     response.end(JSON.stringify(body));
   });
@@ -57,6 +66,12 @@ export async function fakeServer(options: FakeServerOptions): Promise<FakeServer
     socket.on("close", () => sockets.delete(socket));
     socket.on("error", () => {});
     const refusal = options.refuse?.();
+    if (refusal?.stall) {
+      socket.write(
+        `HTTP/1.1 ${refusal.status} Refused\r\ncontent-type: application/json\r\ncontent-length: 1000\r\n\r\n{"err`,
+      );
+      return;
+    }
     if (refusal) {
       const body = JSON.stringify(refusal.body);
       socket.end(
@@ -148,9 +163,13 @@ function accepted(socket: Duplex, headers: IncomingMessage["headers"]): FakeConn
       }
     }
   });
+  const closed = new Promise<void>((resolve) => socket.on("close", () => resolve()));
+  // Node's HTTP server keeps a socket half open after the client ends it: close this side too.
+  socket.on("end", () => socket.end());
   return {
     headers,
     received,
+    closed,
     send: (message) => {
       const text = typeof message === "string" ? message : JSON.stringify(message);
       if (!socket.destroyed) socket.write(frame(1, Buffer.from(text, "utf8")));

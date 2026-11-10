@@ -117,7 +117,7 @@ What a `resync` gives, and what it doesn't:
 
 `reason` is `connected`, `reconnected`, `lagged` (the server dropped events), `host_back` (the account's host or terminal came back) or `overflow` (your loop fell behind and the helper's own queue filled). Pass `snapshot: false` to get the `resync` event without the reads.
 
-A refused key or account (401, 404) ends the stream with that error, as does a key rolled while it was open, at its next read. Network failures never end it: it keeps reconnecting until you close it. An open stream also helps `requests.wait`: a request event ends the wait as soon as it arrives.
+A refused key or account (401, 404) ends the stream with that error, as does a key rolled while it was open, at the stream's next read (or a `requests.wait` lookup's). A network failure never ends it on Node: it keeps reconnecting, with backoff, until you close it. On Bun and Deno the WebSocket can't say why an upgrade failed, so the stream checks with a REST read: a 401 or 404 there ends it at once, and if the API answers but the upgrade keeps failing five times running, it ends with `StreamHandshakeError` (see Runtimes). An open stream also helps `requests.wait`: a request event ends the wait as soon as it arrives, and a trade call never reports a request as pending once the stream has shown it final.
 
 ## Every call
 

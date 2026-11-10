@@ -4,7 +4,7 @@ import { APITimeoutError, AuthenticationError, NotFound, OutcomeUnknown, Pipsock
 import { OPERATIONS, type OperationId } from "./generated/tables.js";
 import { isFatal, type Read } from "./stream/machine.js";
 import { AccountStream, type StreamOptions } from "./stream/stream.js";
-import { isFinal, isRecordedRequest, type TradeRequest, tradeRequestFrom } from "./trade-request.js";
+import { isFinal, isOutstanding, isRecordedRequest, type TradeRequest, tradeRequestFrom } from "./trade-request.js";
 import type {
   AccountView,
   CheckView,
@@ -298,6 +298,9 @@ const DOCUMENTED_CODES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
   OPERATIONS.map((op) => [op.operationId, new Set<string>(op.codes)]),
 );
 
+/** How many settled requests an account handle remembers, to rank slower answers against. */
+const SETTLED_REMEMBERED = 1000;
+
 /** A new idempotency key (a UUID). Make one, save it, then pass it as `idempotencyKey`. */
 export function newKey(): string {
   return crypto.randomUUID();
@@ -365,7 +368,7 @@ export class Account {
     this.#send = context.send;
   }
 
-  #trade(
+  async #trade(
     operation: OperationId,
     method: CallSpec["method"],
     path: string,
@@ -374,7 +377,33 @@ export class Account {
   ): Promise<TradeRequest> {
     const spec: CallSpec = { call: "trade", method, path, operation };
     if (body !== undefined) spec.body = body;
-    return this.#send(spec, options) as Promise<TradeRequest>;
+    return this.#reconcile((await this.#send(spec, options)) as TradeRequest);
+  }
+
+  /** Requests seen final, by id, most recent last: a slower outstanding answer can't undo them. */
+  readonly #settled = new Map<string, TradeRequest>();
+
+  /**
+   * Ranks what is known about a request: outstanding below final. A request seen final (on the
+   * stream, or in an earlier answer) is never moved back to pending or unknown by a slower answer.
+   */
+  #reconcile(request: TradeRequest): TradeRequest {
+    if (isFinal(request)) {
+      this.#settled.delete(request.id);
+      this.#settled.set(request.id, request);
+      if (this.#settled.size > SETTLED_REMEMBERED) {
+        const oldest = this.#settled.keys().next().value;
+        if (oldest !== undefined) this.#settled.delete(oldest);
+      }
+      return request;
+    }
+    const known = this.#settled.get(request.id);
+    if (!known || !isOutstanding(request)) return request;
+    const settled: TradeRequest = { ...known };
+    delete settled.idempotencyKey;
+    delete settled.httpStatus;
+    if (request.idempotencyKey !== undefined) settled.idempotencyKey = request.idempotencyKey;
+    return settled;
   }
 
   /** The account: login, status, connection, and balance, equity and margin. */
@@ -418,10 +447,12 @@ export class Account {
   readonly requests = {
     /** A recorded trade request, by id, whatever its state. */
     get: async (id: string, options?: CallOptions): Promise<TradeRequest> =>
-      this.#send(
-        { call: "lookup", method: "GET", path: `/requests/${encodeURIComponent(nonEmpty("The request id", id))}` },
-        options,
-      ) as Promise<TradeRequest>,
+      this.#reconcile(
+        (await this.#send(
+          { call: "lookup", method: "GET", path: `/requests/${encodeURIComponent(nonEmpty("The request id", id))}` },
+          options,
+        )) as TradeRequest,
+      ),
     /**
      * Looks the request up until it is final or `timeoutMs` passes, then returns it as it stands
      * (still `pending` or `unknown`, perhaps). It never throws for "still pending" and sends nothing
@@ -465,13 +496,19 @@ export class Account {
           maxRetries: 0,
           timeoutMs: Math.min(this.#context.timeoutMs, remaining),
         };
-        if (signal) lookupOptions.signal = signal;
+        // A final state on the stream cuts a lookup in flight short: whichever comes first wins.
+        lookupOptions.signal = sleepSignal;
         try {
           latest = await this.requests.get(id, lookupOptions);
           if (isFinal(latest)) return latest;
         } catch (error) {
           if (signal?.aborted) throw signal.reason;
-          if (error instanceof AuthenticationError || error instanceof NotFound) throw error;
+          if (seenFinal) return seenFinal;
+          if (error instanceof AuthenticationError || error instanceof NotFound) {
+            // The key or the account is gone: an open stream can't resync any more either.
+            if (isFatal(error)) for (const fail of this.#fatalWatchers) fail(error);
+            throw error;
+          }
           lastError = error;
         }
         if (seenFinal) return seenFinal;
@@ -509,8 +546,12 @@ export class Account {
   }
 
   #requestSeen(request: TradeRequest): void {
-    for (const listener of this.#watchers.get(request.id) ?? []) listener(request);
+    const reconciled = this.#reconcile(request);
+    for (const listener of this.#watchers.get(request.id) ?? []) listener(reconciled);
   }
+
+  /** Open streams, told when a read outside them finds the key or the account gone. */
+  readonly #fatalWatchers = new Set<(error: PipsocketError) => void>();
 
   /**
    * The account's stream of events: the API's messages as they are, and a `resync` event after
@@ -533,6 +574,10 @@ export class Account {
         requestSeen: (message) => {
           if (isRecordedRequest(message)) this.#requestSeen(tradeRequestFrom(message));
         },
+        watchFatal: (fail) => {
+          this.#fatalWatchers.add(fail);
+          return () => this.#fatalWatchers.delete(fail);
+        },
       },
       options,
     );
@@ -540,7 +585,8 @@ export class Account {
 
   /** The REST reads the stream helper makes: each is one call, and the helper retries. */
   async #streamRead(read: Read, signal: AbortSignal): Promise<unknown> {
-    const options: CallOptions = { signal };
+    // One attempt each: the stream's machine decides when to try again.
+    const options: CallOptions = { signal, maxRetries: 0 };
     switch (read.what) {
       case "account":
       case "probe":

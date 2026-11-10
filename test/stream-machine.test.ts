@@ -663,3 +663,134 @@ test("a read that fails for another reason is not fatal: 404 for a request id do
   d.refuse("watched", err(NotFound, 404, "no_such_request"));
   expect(d.state).toBe("live");
 });
+
+describe("the checkpoint and what was delivered", () => {
+  test("a deal dropped by overflow before the caller took it is not left out of the history read back", () => {
+    const d = connectedLive({ queueSize: 2 });
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    d.message({ type: "deal", deal: { ticket: 41 } });
+    d.message({ type: "tick", symbol: "EURUSD", time_msc: 1 });
+    d.message({ type: "tick", symbol: "EURUSD", time_msc: 2 }); // overflows: the deal was never taken
+    d.completeResync({}, { deals: [{ ticket: 41 }] });
+    expect(d.resyncs()[0]?.history?.deals).toEqual([{ ticket: 41 }]);
+  });
+
+  test("a resync with the terminal unavailable leaves the checkpoint where it was", () => {
+    const d = connectedLive();
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 4000 });
+    d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+    d.answer("watched", null);
+    d.drain();
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 5000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+
+  test("a resync whose batch overflows doesn't move the checkpoint", () => {
+    const d = connectedLive({ queueSize: 3 });
+    d.message({ type: "lagged", missed: 1 });
+    d.message({ type: "deal", deal: { ticket: 1 } });
+    d.message({ type: "deal", deal: { ticket: 2 } });
+    d.message({ type: "deal", deal: { ticket: 3 } });
+    // lagged + resync + 3 held deals is more than the queue holds: the resync starts again.
+    d.completeResync({ account: { ...ACCOUNT, server_time: ACCOUNT.server_time + 4000 } });
+    expect(d.state).toBe("syncing");
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 5000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+
+  test("a new login forgets the old one's tickets and checkpoint, even with the terminal unavailable", () => {
+    const d = connectedLive();
+    d.message({ type: "deal", deal: { ticket: 500 } });
+    d.drain();
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, login: 777 });
+    d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+    d.answer("watched", null);
+    expect(d.resyncs()[0]).toMatchObject({ history: null, history_reason: "account_changed" });
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 10 });
+    d.drain();
+    d.message({ type: "lagged", missed: 1 });
+    d.completeResync({ account: { ...ACCOUNT, login: 777 } }, { deals: [{ ticket: 500 }] });
+    expect(d.resyncs()[0]?.history?.deals).toEqual([{ ticket: 500 }]);
+  });
+});
+
+describe("more transitions", () => {
+  test("the terminal coming back during a resync that found it away starts another resync", () => {
+    const d = connectedLive();
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", ACCOUNT);
+    d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+    d.message({ type: "status", status: "connected", detail: null });
+    d.answer("watched", null);
+    expect(d.state).toBe("syncing");
+    expect(d.resyncs()).toHaveLength(1);
+  });
+
+  test("a refused set doesn't undo a newer one waiting behind it", () => {
+    const d = connectedLive();
+    d.feed({ type: "set_ticks", id: 1, symbols: ["A"] });
+    d.feed({ type: "set_ticks", id: 2, symbols: ["B"] });
+    d.answerTicks(422, { error: "invalid_request", message: "..." });
+    expect(d.lastTicksCall()?.symbols).toEqual(["B"]);
+    d.answerTicks();
+    expect(d.machine.ticks).toEqual(["B"]);
+    expect(d.actions.filter((a) => a.type === "ticks_settled").map((a) => [a.id, "error" in a])).toEqual([
+      [1, true],
+      [2, false],
+    ]);
+  });
+
+  test("a ticks answer from before a reconnect is ignored", () => {
+    const d = connectedLive();
+    d.feed({ type: "set_ticks", id: 1, symbols: ["A"] });
+    const stale = d.lastTicksCall();
+    d.feed({ type: "closed" });
+    d.feed({ type: "timer", name: "backoff" });
+    d.subscribe();
+    const fresh = d.lastTicksCall();
+    expect(fresh?.id).not.toBe(stale?.id);
+    expect(d.message({ type: "response", id: stale?.id, status: 200, body: { symbols: ["A"] } })).toEqual([]);
+    expect(d.state).toBe("syncing");
+  });
+
+  test("a second subscribed message changes nothing", () => {
+    const d = connectedLive();
+    expect(d.message({ type: "subscribed", account: "acc_1" })).toEqual([]);
+    expect(d.state).toBe("live");
+  });
+
+  test("a 401 on the probe while the host is away stops the helper", () => {
+    const d = connectedLive();
+    d.message({ type: "engine_disconnected" });
+    d.feed({ type: "timer", name: "probe" });
+    d.refuse("probe", err(AuthenticationError, 401, "invalid_api_key"));
+    expect(d.state).toBe("failed");
+  });
+
+  test.each(["connecting", "host_away"])("close() while %s stops at once", (state) => {
+    const d = state === "connecting" ? new Driver() : connectedLive();
+    if (state === "connecting") d.feed({ type: "start" });
+    else d.message({ type: "engine_disconnected" });
+    const out = d.feed({ type: "close" });
+    expect(d.state).toBe("closed");
+    expect(out).toContainEqual({ type: "close_socket" });
+    expect(out).toContainEqual({ type: "cancel_timer", name: "probe" });
+  });
+
+  test("a fatal error found outside the stream (a wait() lookup) stops it", () => {
+    const d = connectedLive();
+    d.feed({ type: "fatal", error: err(AuthenticationError, 401, "invalid_api_key") });
+    expect(d.state).toBe("failed");
+    expect(d.machine.error).toBeInstanceOf(AuthenticationError);
+  });
+});

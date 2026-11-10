@@ -87,7 +87,9 @@ export type Input =
   | { type: "read_ok"; id: number; value: unknown }
   | { type: "read_failed"; id: number; error: unknown }
   | { type: "set_ticks"; id: number; symbols: string[] }
-  | { type: "close" };
+  | { type: "close" }
+  /** A read made outside the stream (a wait() lookup) found the key or the account gone. */
+  | { type: "fatal"; error: PipsocketError };
 
 export type Action =
   | { type: "connect" }
@@ -165,6 +167,8 @@ interface Resync {
   slices: Array<{ from: number; to: number }>;
   deals: DealView[];
   historyOrders: HistoryOrderView[];
+  /** The snapshot showed a different login or server than the last one. */
+  identityChanged: boolean;
 }
 
 export class StreamMachine {
@@ -203,6 +207,10 @@ export class StreamMachine {
   #baseline: { login: number; server: string } | null = null;
   /** The last snapshot found the terminal not running: resync when a status shows it back. */
   #terminalAway = false;
+  /** A status event showed the terminal connected while the resync ran. */
+  #terminalBackDuringResync = false;
+  /** For each resync event queued, the checkpoint to commit when the caller takes it. */
+  #checkpointOnTake = new WeakMap<object, Checkpoint>();
   #deliveredDeals = new Set<number>();
   #deliveredOrders = new Set<number>();
   #nextId = 1;
@@ -224,8 +232,25 @@ export class StreamMachine {
   /** The next event for the caller, if one is waiting. */
   take(): QueuedEvent | undefined {
     const event = this.#queue.shift();
-    if (event && this.state !== "syncing") this.#advanceCheckpoint(event);
+    if (event) this.#delivered(event);
     return event;
+  }
+
+  /**
+   * Bookkeeping for an event the caller has now received: its tickets, for leaving them out of
+   * history read back later, and the checkpoint, which stays frozen while a resync runs.
+   */
+  #delivered(event: QueuedEvent): void {
+    if (event.type === "deal") this.#rememberDeal(event as StreamMessage);
+    if (event.type === "resync") {
+      const history = (event as ResyncEvent).history;
+      for (const deal of history?.deals ?? []) this.#rememberTicket(this.#deliveredDeals, deal.ticket);
+      for (const order of history?.orders ?? []) this.#rememberTicket(this.#deliveredOrders, order.ticket);
+    }
+    if (this.state === "syncing") return;
+    const committed = this.#checkpointOnTake.get(event);
+    if (committed) this.#checkpoint = committed;
+    else this.#advanceCheckpoint(event);
   }
 
   handle(input: Input): Action[] {
@@ -260,6 +285,8 @@ export class StreamMachine {
         return this.#readFailed(input.id, input.error);
       case "set_ticks":
         return this.#setTicks(input.id, input.symbols);
+      case "fatal":
+        return this.#fail(input.error);
     }
   }
 
@@ -408,7 +435,6 @@ export class StreamMachine {
     // Live.
     const actions: Action[] = [];
     if (type === "request") actions.push({ type: "request_seen", request: message });
-    if (type === "deal") this.#rememberDeal(message);
     actions.push(...this.#enqueue(message));
     if (this.state === "live" && type === "status" && this.#terminalAway && message.status === "connected") {
       actions.push(...this.#startResync("host_back"));
@@ -427,6 +453,7 @@ export class StreamMachine {
     }
     const actions: Action[] = [];
     if (type === "request") actions.push({ type: "request_seen", request: message });
+    if (type === "status" && message.status === "connected") this.#terminalBackDuringResync = true;
     if (!HELD_TYPES.has(type)) return [...actions, ...this.#enqueue(message)];
     if (this.#held.length >= this.#options.queueSize) {
       // The held events overflowed: a gap of the helper's own, so the resync starts again.
@@ -483,7 +510,8 @@ export class StreamMachine {
       // The socket keeps the set it had. With no setTicks call to reject, the refused set is the one
       // the stream was opened with or kept from before: the stream can't serve it, so it ends.
       if (call.waiters.length === 0) return [...actions, ...this.#fail(error)];
-      this.#ticks = [...this.#acceptedTicks];
+      // Roll back to the accepted set, unless a newer set is already waiting to go.
+      if (this.#ticksWaiting.length === 0) this.#ticks = [...this.#acceptedTicks];
     } else {
       this.#acceptedTicks = call.symbols;
       this.#freshSocket = false;
@@ -511,6 +539,7 @@ export class StreamMachine {
     this.state = "syncing";
     this.#probeId = null;
     this.#resync = this.#newResync(reason);
+    this.#terminalBackDuringResync = false;
     const actions: Action[] = [
       { type: "cancel_timer", name: "probe" },
       { type: "cancel_timer", name: "resync_retry" },
@@ -541,6 +570,7 @@ export class StreamMachine {
       slices: [],
       deals: [],
       historyOrders: [],
+      identityChanged: false,
     };
   }
 
@@ -626,18 +656,16 @@ export class StreamMachine {
     const account = resync.account;
     const checkpoint = resync.checkpoint;
     resync.step = "watched";
+    if (resync.identityChanged) {
+      resync.historyReason = "account_changed";
+      return;
+    }
     if (resync.positions === null || resync.orders === null) {
       resync.historyReason = "unavailable";
       return;
     }
     if (!checkpoint) {
       resync.historyReason = "no_checkpoint";
-      return;
-    }
-    if (account && (account.login !== checkpoint.login || account.server !== checkpoint.server)) {
-      resync.historyReason = "account_changed";
-      this.#checkpoint = null;
-      resync.checkpoint = null;
       return;
     }
     const now = typeof account?.server_time === "number" ? account.server_time : null;
@@ -659,23 +687,19 @@ export class StreamMachine {
       history: resync.history,
       history_reason: resync.history ? null : resync.historyReason,
     };
-    if (resync.history) {
-      for (const deal of resync.history.deals) this.#rememberTicket(this.#deliveredDeals, deal.ticket);
-      for (const order of resync.history.orders) this.#rememberTicket(this.#deliveredOrders, order.ticket);
+    const unavailable = resync.positions === null || resync.orders === null;
+    if (resync.account) this.#terminalAway = unavailable;
+    // The checkpoint moves only when the caller takes a resync that recovered the account: one
+    // with the terminal unavailable reads from the same checkpoint next time.
+    const account = resync.account;
+    if (account && !unavailable && typeof account.server_time === "number") {
+      this.#checkpointOnTake.set(event, {
+        serverTime: Math.max(account.server_time, resync.checkpoint?.serverTime ?? 0),
+        login: account.login,
+        server: account.server,
+      });
     }
-    if (resync.account) {
-      this.#baseline = { login: resync.account.login, server: resync.account.server };
-      this.#terminalAway = resync.positions === null || resync.orders === null;
-      if (typeof resync.account.server_time === "number") {
-        this.#checkpoint = {
-          serverTime: Math.max(resync.account.server_time, resync.checkpoint?.serverTime ?? 0),
-          login: resync.account.login,
-          server: resync.account.server,
-        };
-      } else if (resync.checkpoint) {
-        this.#checkpoint = { ...resync.checkpoint, login: resync.account.login, server: resync.account.server };
-      }
-    }
+    const terminalBack = unavailable && this.#terminalBackDuringResync;
     this.#resync = null;
     this.state = "live";
     this.#everLive = true;
@@ -694,9 +718,10 @@ export class StreamMachine {
       this.#queue = [];
       return [...actions, ...this.#startResync("overflow")];
     }
-    for (const message of held) if (message.type === "deal") this.#rememberDeal(message);
     this.#queue.push(...batch);
     actions.push({ type: "wake" });
+    // The terminal came back while this resync found it away: read again now it is there.
+    if (terminalBack) actions.push(...this.#startResync("host_back"));
     return actions;
   }
 
@@ -711,10 +736,20 @@ export class StreamMachine {
     if (this.state !== "syncing" || !resync || resync.waitingOn !== id) return [];
     resync.waitingOn = null;
     switch (resync.step) {
-      case "account":
-        resync.account = value as AccountView;
+      case "account": {
+        const account = value as AccountView;
+        resync.account = account;
+        const baseline = this.#baseline;
+        if (baseline && (account.login !== baseline.login || account.server !== baseline.server)) {
+          // Another login now: nothing from the old one says anything about this one.
+          this.#forgetAccount();
+          resync.checkpoint = null;
+          resync.identityChanged = true;
+        }
+        this.#baseline = { login: account.login, server: account.server };
         if (isRecordObject(value)) this.#noteServerTime(value);
         break;
+      }
       case "positions":
         resync.positions = value as PositionView[];
         break;
@@ -861,6 +896,13 @@ export class StreamMachine {
       login: this.#baseline.login,
       server: this.#baseline.server,
     };
+  }
+
+  #forgetAccount(): void {
+    this.#checkpoint = null;
+    this.#newestServerTime = null;
+    this.#deliveredDeals.clear();
+    this.#deliveredOrders.clear();
   }
 
   #noteServerTime(message: Record<string, unknown>): void {

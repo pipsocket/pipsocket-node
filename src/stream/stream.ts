@@ -27,6 +27,8 @@ export interface StreamContext {
   random: () => number;
   read: (read: Read, signal: AbortSignal) => Promise<unknown>;
   requestSeen: (request: Record<string, unknown>) => void;
+  /** Registers the stream to be told when a read outside it finds the key or account gone. */
+  watchFatal: (fail: (error: PipsocketError) => void) => () => void;
 }
 
 /**
@@ -49,6 +51,7 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
   #ended = false;
   #error: unknown = null;
   #errorThrown = false;
+  readonly #unwatchFatal: () => void;
 
   constructor(context: StreamContext, options: StreamOptions = {}) {
     this.#context = context;
@@ -59,6 +62,7 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
       random: context.random,
     });
     this.#socketFactory = options.socket ? Promise.resolve(options.socket) : defaultSocket();
+    this.#unwatchFatal = context.watchFatal((error) => this.#input({ type: "fatal", error }));
     // A missing ws package surfaces from the first read of the stream.
     this.#socketFactory.then(
       () => this.#input({ type: "start" }),
@@ -171,9 +175,11 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
   }
 
   async #connect(): Promise<void> {
-    const factory = await this.#socketFactory;
     const generation = this.#generation;
+    const factory = await this.#socketFactory;
     const current = () => generation === this.#generation && !this.#ended;
+    // Closed, or moved on, while the factory loaded: open nothing.
+    if (!current()) return;
     this.#socket = factory(this.#context.url, this.#context.headers(), {
       opened: () => current() && this.#input({ type: "opened" }),
       text: (text) => current() && this.#input({ type: "text", text }),
@@ -203,6 +209,7 @@ export class AccountStream implements AsyncIterable<StreamEvent> {
     if (this.#ended) return;
     this.#ended = true;
     this.#error = error;
+    this.#unwatchFatal();
     if (this.#machine.state !== "closed" && this.#machine.state !== "failed") this.#input({ type: "close" });
     this.#abort.abort();
     for (const timer of this.#timers.values()) clearTimeout(timer);
