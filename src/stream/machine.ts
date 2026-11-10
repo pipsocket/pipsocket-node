@@ -259,15 +259,21 @@ export class StreamMachine {
     if (this.#identityOf.get(event) !== this.#identity) return;
     if (event.type === "deal") this.#rememberDeal(event as StreamMessage);
     if (event.type === "resync") {
+      const resync = event as ResyncEvent;
       // The caller has the account_changed now: later resyncs read history again.
-      if ((event as ResyncEvent).history_reason === "account_changed") this.#identityChangePending = false;
-      const history = (event as ResyncEvent).history;
-      for (const deal of history?.deals ?? []) this.#rememberTicket(this.#deliveredDeals, deal.ticket);
-      for (const order of history?.orders ?? []) this.#rememberTicket(this.#deliveredOrders, order.ticket);
+      if (resync.history_reason === "account_changed") this.#identityChangePending = false;
+      const history = resync.history;
+      if (history) {
+        // Leave out what the caller has already taken, as deal events or in an earlier resync.
+        history.deals = history.deals.filter((deal) => !this.#deliveredDeals.has(deal.ticket));
+        history.orders = history.orders.filter((order) => !this.#deliveredOrders.has(order.ticket));
+        for (const deal of history.deals) this.#rememberTicket(this.#deliveredDeals, deal.ticket);
+        for (const order of history.orders) this.#rememberTicket(this.#deliveredOrders, order.ticket);
+      }
     }
     // The checkpoint follows the order the caller takes events, whatever state the machine is in.
     // A resync in progress isn't affected: it reads from the checkpoint it started with.
-    const committed = this.#checkpointOnTake.get(event);
+    const committed = this.#recoveredWith(event);
     if (committed) {
       const current = this.#checkpoint;
       this.#checkpoint =
@@ -671,8 +677,9 @@ export class StreamMachine {
       case "history_orders":
         if (resync.range) {
           resync.history = {
-            deals: resync.deals.filter((d) => !this.#deliveredDeals.has(d.ticket)),
-            orders: resync.historyOrders.filter((o) => !this.#deliveredOrders.has(o.ticket)),
+            // Deduplicated against what the caller has taken when it takes this resync.
+            deals: resync.deals,
+            orders: resync.historyOrders,
             from: resync.range.from,
             to: resync.range.to,
           };
@@ -722,7 +729,10 @@ export class StreamMachine {
       history_reason: resync.history ? null : resync.historyReason,
     };
     // The terminal away for the snapshot or for the history: nothing recovered past the checkpoint.
-    const unavailable = resync.positions === null || resync.orders === null || resync.historyReason === "unavailable";
+    // (With snapshot: false nothing is read, so nothing counts as found away.)
+    const unavailable =
+      this.#options.snapshot &&
+      (resync.positions === null || resync.orders === null || resync.historyReason === "unavailable");
     if (resync.account) this.#terminalAway = unavailable;
     // The checkpoint moves only when the caller takes a resync that recovered the account: one
     // with the terminal unavailable reads from the same checkpoint next time.
@@ -929,6 +939,20 @@ export class StreamMachine {
     this.#identityOf.set(event, this.#identity);
     this.#queue.push(event);
     return [{ type: "wake" }];
+  }
+
+  /**
+   * The checkpoint a resync event commits when taken, if it recovered the interval since the current
+   * one: it read history back, or history could never be read (range_too_large), or there is no
+   * checkpoint yet for it to skip past. A resync that started before the current checkpoint was
+   * set, and so read no history, recovers nothing.
+   */
+  #recoveredWith(event: QueuedEvent): Checkpoint | undefined {
+    const committed = this.#checkpointOnTake.get(event);
+    if (!committed) return undefined;
+    const resync = event as ResyncEvent;
+    const covered = resync.history !== null || resync.history_reason === "range_too_large";
+    return covered || !this.#checkpoint ? committed : undefined;
   }
 
   #advanceCheckpoint(event: QueuedEvent): void {

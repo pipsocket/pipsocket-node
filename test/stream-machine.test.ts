@@ -1015,3 +1015,53 @@ describe("the checkpoint follows the order the caller takes events, in any state
     expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
   });
 });
+
+describe("recovery is judged when the caller takes the resync", () => {
+  test("a resync that started with no checkpoint doesn't clear a gap established while it ran", () => {
+    const d = new Driver();
+    d.feed({ type: "start" });
+    d.subscribe();
+    d.completeResync(); // A: the first checkpoint, at T, queued
+    d.message({ type: "lagged", missed: 1 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 });
+    d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+    d.answer("watched", null); // B: unrecovered, queued
+    d.message({ type: "lagged", missed: 2 }); // C starts, with no checkpoint taken yet
+    d.drain(); // A and B taken while C runs
+    d.completeResync({ account: { ...ACCOUNT, server_time: ACCOUNT.server_time + 20_000 } });
+    expect(d.resyncs()[0]).toMatchObject({ history: null, history_reason: "no_checkpoint" });
+    d.message({ type: "account", server_time: ACCOUNT.server_time + 30_000 });
+    d.drain();
+    d.message({ type: "lagged", missed: 3 });
+    d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 40_000 });
+    d.answer("positions", []);
+    d.answer("orders", []);
+    const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+    expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  });
+
+  test("history leaves out deals the caller took ahead of the resync, as events or in an earlier resync", () => {
+    const d = connectedLive();
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    d.message({ type: "deal", deal: { ticket: 41 } }); // queued, not taken
+    d.message({ type: "lagged", missed: 1 });
+    d.completeResync({}, { deals: [{ ticket: 41 }, { ticket: 42 }] });
+    d.message({ type: "lagged", missed: 2 });
+    d.completeResync({}, { deals: [{ ticket: 42 }, { ticket: 43 }] });
+    const events = d.drain();
+    expect(events.map((e) => e.type)).toEqual(["deal", "lagged", "resync", "lagged", "resync"]);
+    const histories = events.filter((e): e is ResyncEvent => e.type === "resync").map((r) => r.history?.deals);
+    expect(histories).toEqual([[{ ticket: 42 }], [{ ticket: 43 }]]);
+  });
+});
+
+test("with snapshot: false, a status event during a resync doesn't start another one", () => {
+  const d = new Driver({ snapshot: false });
+  d.feed({ type: "start" });
+  d.subscribe();
+  d.answerTicks();
+  d.message({ type: "status", status: "connected", detail: null });
+  d.answer("watched", null);
+  expect(d.state).toBe("live");
+});
