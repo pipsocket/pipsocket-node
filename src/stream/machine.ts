@@ -214,6 +214,11 @@ export class StreamMachine {
   /** Bumped when the account's login or server changes; each queued event keeps the one it came in. */
   #identity = 0;
   #identityOf = new WeakMap<object, number>();
+  /**
+   * A resync finished without recovering the gap (the terminal away for the snapshot or history):
+   * the checkpoint stays put, account events included, until a resync recovers it.
+   */
+  #unrecoveredGap = false;
   /** A login or server change seen and not yet taken by the caller on a resync event. */
   #identityChangePending = false;
   #deliveredDeals = new Set<number>();
@@ -258,8 +263,12 @@ export class StreamMachine {
     }
     if (this.state === "syncing") return;
     const committed = this.#checkpointOnTake.get(event);
-    if (committed) this.#checkpoint = committed;
-    else this.#advanceCheckpoint(event);
+    if (committed) {
+      this.#checkpoint = committed;
+      this.#unrecoveredGap = false;
+    } else if (!this.#unrecoveredGap) {
+      this.#advanceCheckpoint(event);
+    }
   }
 
   handle(input: Input): Action[] {
@@ -714,6 +723,8 @@ export class StreamMachine {
         server: account.server,
       });
     }
+    // A gap needs recovering only from a checkpoint; without one, account events set the first.
+    if (unavailable && resync.checkpoint) this.#unrecoveredGap = true;
     const terminalBack = unavailable && this.#terminalBackDuringResync;
     this.#resync = null;
     this.state = "live";
@@ -921,6 +932,8 @@ export class StreamMachine {
 
   #forgetAccount(): void {
     this.#checkpoint = null;
+    // The old login's gap can't be recovered for the new one.
+    this.#unrecoveredGap = false;
     this.#newestServerTime = null;
     this.#deliveredDeals.clear();
     this.#deliveredOrders.clear();

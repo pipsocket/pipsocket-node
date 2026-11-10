@@ -897,3 +897,34 @@ test("account_changed is reported again if the resync that carried it overflowed
   expect(next?.history_reason).toBeNull();
   expect(next?.history).not.toBeNull();
 });
+
+test("after a resync that couldn't read history, account events don't move the checkpoint until a resync recovers it", () => {
+  const d = connectedLive();
+  d.message({ type: "account", server_time: ACCOUNT.server_time });
+  d.drain();
+  d.message({ type: "lagged", missed: 1 });
+  d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 10_000 });
+  d.refuse("positions", err(AccountUnavailable, 503, "account_not_connected"));
+  d.answer("watched", null);
+  d.drain();
+  d.message({ type: "account", server_time: ACCOUNT.server_time + 15_000 });
+  d.drain(); // taken while the gap is still unrecovered
+  d.message({ type: "lagged", missed: 2 });
+  d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 20_000 });
+  d.answer("positions", []);
+  d.answer("orders", []);
+  const deals = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+  expect(deals.from).toBe(ACCOUNT.server_time - TIMING.historyMarginS);
+  d.answer("deals", []);
+  d.answer("history_orders", []);
+  d.answer("watched", null);
+  d.drain(); // recovered and taken: the checkpoint moves on, and account events move it again
+  d.message({ type: "account", server_time: ACCOUNT.server_time + 30_000 });
+  d.drain();
+  d.message({ type: "lagged", missed: 3 });
+  d.answer("account", { ...ACCOUNT, server_time: ACCOUNT.server_time + 31_000 });
+  d.answer("positions", []);
+  d.answer("orders", []);
+  const after = d.pendingRead("deals").read as Extract<Read, { what: "deals" }>;
+  expect(after.from).toBe(ACCOUNT.server_time + 30_000 - TIMING.historyMarginS);
+});
