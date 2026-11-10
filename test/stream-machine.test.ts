@@ -4,7 +4,7 @@
 import { describe, expect, test } from "vitest";
 import {
   AccountUnavailable,
-  type APIError,
+  APIError,
   AuthenticationError,
   NotFound,
   RangeTooLarge,
@@ -851,5 +851,34 @@ describe("recovery that falls short", () => {
     expect(d.state).toBe("live");
     d.feed({ type: "read_failed", id: probe.id, error: err(AuthenticationError, 401, "invalid_api_key") });
     expect(d.state).toBe("failed");
+  });
+});
+
+describe("held events and fatal reads", () => {
+  test("an event held under the old login keeps that login through a restart and a login change", () => {
+    const d = connectedLive();
+    d.message({ type: "lagged", missed: 1 });
+    d.message({ type: "deal", deal: { ticket: 500 } }); // held, under the old login
+    d.message({ type: "lagged", missed: 2 });
+    d.completeResync({ account: { ...ACCOUNT, login: 777 } });
+    d.drain();
+    d.message({ type: "account", server_time: ACCOUNT.server_time });
+    d.drain();
+    d.message({ type: "lagged", missed: 3 });
+    d.completeResync({ account: { ...ACCOUNT, login: 777 } }, { deals: [{ ticket: 500 }] });
+    expect(d.resyncs()[0]?.history?.deals).toEqual([{ ticket: 500 }]);
+  });
+
+  test.each([
+    [401, "brand_new_code", "failed"],
+    [401, null, "failed"],
+    [404, "gone_for_good", "failed"],
+    [404, "no_such_request", "syncing"],
+  ])("a %i with code %s on a resync read: %s", (status, code, state) => {
+    const d = connectedLive();
+    d.message({ type: "lagged", missed: 1 });
+    const error = new APIError({ status, code, body: code ? { error: code } : undefined, raw: "" });
+    d.refuse("account", error);
+    expect(d.state).toBe(state);
   });
 });

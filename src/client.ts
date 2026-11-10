@@ -1,6 +1,6 @@
 import { type AttemptResult, attempt, type FetchLike, type HttpRequest } from "./attempt.js";
 import { backoffMs, type CallKind, interpret } from "./core.js";
-import { APITimeoutError, AuthenticationError, NotFound, OutcomeUnknown, PipsocketError } from "./errors.js";
+import { APIError, APITimeoutError, OutcomeUnknown, PipsocketError } from "./errors.js";
 import { OPERATIONS, type OperationId } from "./generated/tables.js";
 import { isFatal, type Read } from "./stream/machine.js";
 import { AccountStream, type StreamOptions } from "./stream/stream.js";
@@ -505,8 +505,9 @@ export class Account {
         } catch (error) {
           if (signal?.aborted) throw signal.reason;
           if (seenFinal) return seenFinal;
-          if (error instanceof AuthenticationError || error instanceof NotFound) {
-            // The key or the account is gone: an open stream can't resync any more either.
+          // A 401 or 404 won't mend, whatever its code (or none). The key or the account gone ends
+          // the open streams too: they can't resync any more.
+          if (error instanceof APIError && (error.status === 401 || error.status === 404)) {
             if (isFatal(error)) for (const fail of this.#fatalWatchers) fail(error);
             throw error;
           }

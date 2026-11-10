@@ -281,6 +281,33 @@ describe("requests.wait and trade answers with a stream open", () => {
     await expect(events.next()).rejects.toBeInstanceOf(AuthenticationError);
   });
 
+  test("a 401 the SDK can't read (plain text) on a wait's lookup ends the wait and the open stream", async () => {
+    let rolled = false;
+    const { acct } = await start({
+      rest: (request) => (rolled && request.path.includes("/requests/") ? [401, "Unauthorized"] : healthyRest(request)),
+    });
+    const stream = acct.stream();
+    const events = stream[Symbol.asyncIterator]();
+    await nextEvent(events);
+    rolled = true;
+    await expect(acct.requests.wait("req_9")).rejects.toMatchObject({ status: 401 });
+    await expect(events.next()).rejects.toMatchObject({ status: 401 });
+  });
+
+  test("a 404 with a code this version doesn't know, on a resync read, ends the stream", async () => {
+    let gone = false;
+    const { server, acct } = await start({
+      rest: (request) => (gone ? [404, { error: "account_retired", message: "..." }] : healthyRest(request)),
+    });
+    const stream = acct.stream();
+    const events = stream[Symbol.asyncIterator]();
+    await nextEvent(events);
+    gone = true;
+    server.connections[0]?.send({ type: "lagged", missed: 1 });
+    expect(await nextEvent(events)).toEqual({ type: "lagged", missed: 1 });
+    await expect(events.next()).rejects.toMatchObject({ status: 404, code: "account_retired" });
+  });
+
   test("a pending wait outlives a reconnect: the final event on the new socket ends it", async () => {
     const { server, acct } = await start();
     const stream = acct.stream();

@@ -455,7 +455,10 @@ export class StreamMachine {
     if (type === "tick") {
       const symbol = typeof message.symbol === "string" ? message.symbol : "";
       const kept = this.#heldTicks.get(symbol);
-      if (!kept || timeOf(message) >= timeOf(kept)) this.#heldTicks.set(symbol, message);
+      if (!kept || timeOf(message) >= timeOf(kept)) {
+        this.#heldTicks.set(symbol, message);
+        this.#identityOf.set(message, this.#identity);
+      }
       return [];
     }
     const actions: Action[] = [];
@@ -468,6 +471,8 @@ export class StreamMachine {
       this.#heldTicks.clear();
       return [...actions, ...this.#restartResync("overflow")];
     }
+    // Held under the login it arrived with: a login change found later doesn't relabel it.
+    this.#identityOf.set(message, this.#identity);
     this.#held.push(message);
     return actions;
   }
@@ -726,7 +731,7 @@ export class StreamMachine {
       this.#queue = [];
       return [...actions, ...this.#startResync("overflow")];
     }
-    for (const queued of batch) this.#identityOf.set(queued, this.#identity);
+    for (const queued of batch) if (!this.#identityOf.has(queued)) this.#identityOf.set(queued, this.#identity);
     this.#queue.push(...batch);
     if (resync.identityChanged) this.#identityChangePending = false;
     actions.push({ type: "wake" });
@@ -958,10 +963,14 @@ function isRecordObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** A 401, or a 404 for the account: these don't mend, so the helper stops. */
+/**
+ * A 401, or a 404 for the account: these don't mend, so the helper stops. Judged by the status, so
+ * a refusal with a code this version doesn't know, or no JSON at all, counts too.
+ */
 export function isFatal(error: unknown): boolean {
-  if (error instanceof AuthenticationError) return true;
-  return error instanceof NotFound && error.code !== "no_such_request";
+  if (!(error instanceof APIError)) return false;
+  if (error.status === 401) return true;
+  return error.status === 404 && error.code !== "no_such_request";
 }
 
 function ticksMessage(id: number, symbols: readonly string[]): string {
