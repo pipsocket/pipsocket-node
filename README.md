@@ -167,7 +167,7 @@ A key matches the first request made with it, whatever the body: never build key
 
 ## Errors and retries
 
-When a call can't give you its answer, it throws. Every error is a `PipsocketError`, and every error a trade call throws carries the `idempotencyKey` it sent:
+When a call can't give you its answer, it throws a `PipsocketError`. Every `PipsocketError` a trade call throws carries the `idempotencyKey` it sent. Two things a trade call can throw are not `PipsocketError`s and don't carry it: a `TypeError` for a bad argument (a malformed key or ticket), raised before anything is sent, and your own `AbortSignal`'s reason, passed through as it is. A cancelled trade may still have been sent, so for a call you may cancel, make the key with `newKey()` and save it first.
 
 | Error                                                       | When                                                                                                                                                    |
 | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
